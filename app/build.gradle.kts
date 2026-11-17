@@ -12,8 +12,8 @@ android {
         applicationId = "ru.marshrut.razvozki"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
     }
 
     compileOptions {
@@ -27,5 +27,5 @@ android {
 }
 
 dependencies {
-    implementation("com.rmtheis:tess-two:9.1.0")
+    implementation("cz.adaptech.tesseract4android:tesseract4android:4.9.0")
 }
