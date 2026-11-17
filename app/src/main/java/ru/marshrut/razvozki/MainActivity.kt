@@ -21,6 +21,7 @@ import android.widget.Toast
 import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
 import com.googlecode.tesseract.android.TessBaseAPI
+import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
@@ -33,7 +34,9 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var addressesContainer: LinearLayout
     private lateinit var photoButton: Button
+    private lateinit var geocodeButton: Button
     private lateinit var countText: TextView
+    private lateinit var coordinatesText: TextView
 
     private val addresses = mutableListOf<String>()
 
@@ -42,6 +45,15 @@ class MainActivity : Activity() {
 
     private val executor = Executors.newSingleThreadExecutor()
     private val cameraRequest = 1001
+
+    private val warehouseAddress =
+        "Индустриальный проезд, 22/1, 423800, Набережные Челны, Республика Татарстан, Россия"
+
+    data class GeocodeResult(
+        val address: String,
+        val longitude: Double,
+        val latitude: Double
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -82,6 +94,24 @@ class MainActivity : Activity() {
             addView(addressesContainer)
         }
 
+        geocodeButton = Button(this).apply {
+            text = "НАЙТИ КООРДИНАТЫ В 2ГИС"
+            isEnabled = false
+            setOnClickListener {
+                geocodeAddresses()
+            }
+        }
+
+        coordinatesText = TextView(this).apply {
+            text = ""
+            textSize = 14f
+            setPadding(0, 12, 0, 12)
+        }
+
+        val resultScroll = ScrollView(this).apply {
+            addView(coordinatesText)
+        }
+
         layout.addView(title)
         layout.addView(photoButton)
         layout.addView(status)
@@ -93,6 +123,17 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 0,
                 1f
+            )
+        )
+
+        layout.addView(geocodeButton)
+
+        layout.addView(
+            resultScroll,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                0.7f
             )
         )
 
@@ -486,8 +527,6 @@ class MainActivity : Activity() {
         return bestText
     }
 
-    // НОВАЯ ЛОГИКА ОПРЕДЕЛЕНИЯ И ОБЪЕДИНЕНИЯ АДРЕСОВ
-
     private fun extractAddresses(text: String): List<String> {
 
         val lines = text
@@ -561,7 +600,6 @@ class MainActivity : Activity() {
 
             val street = hasWord(line, addressWords)
             val number = hasNumber(line)
-
             val city = hasCity(line)
 
             return (
@@ -588,9 +626,6 @@ class MainActivity : Activity() {
             val currentHasStreet = hasWord(line, streetWords)
             val currentHasNumber = hasNumber(line)
 
-            // Если предыдущая строка уже содержит законченный адрес,
-            // начинаем формировать следующий адрес.
-
             val pendingComplete =
                 pendingHasStreet && pendingHasNumber ||
                 pendingHasCity && pendingHasNumber
@@ -602,16 +637,12 @@ class MainActivity : Activity() {
                 continue
             }
 
-            // Не объединяем два разных названия улиц.
-
             if (pendingHasStreet && currentHasStreet) {
 
                 combinedLines.add(pending)
                 pending = line
                 continue
             }
-
-            // Объединяем город и улицу либо улицу и номер дома.
 
             val canJoin =
                 pendingHasCity && currentHasStreet ||
@@ -642,10 +673,7 @@ class MainActivity : Activity() {
             if (isAddress(line)) {
 
                 val cleaned = line
-                    .replace(
-                        Regex("""^[\s\-•*]+"""),
-                        ""
-                    )
+                    .replace(Regex("""^[\s\-•*]+"""), "")
                     .replace(Regex("""\s+"""), " ")
                     .trim()
                     .trim(',', ';')
@@ -668,16 +696,16 @@ class MainActivity : Activity() {
         }
     }
 
-    // ОТОБРАЖЕНИЕ ТОЛЬКО АДРЕСОВ
-
     private fun showAddresses(found: List<String>) {
 
         addresses.clear()
         addresses.addAll(found)
 
         addressesContainer.removeAllViews()
+        coordinatesText.text = ""
 
         countText.text = "Найдено адресов: ${addresses.size}"
+        geocodeButton.isEnabled = addresses.isNotEmpty()
 
         if (addresses.isEmpty()) {
 
@@ -717,7 +745,10 @@ class MainActivity : Activity() {
                 text = "X"
 
                 setOnClickListener {
-                    addresses.removeAt(index)
+                    saveEditedAddresses()
+                    if (index < addresses.size) {
+                        addresses.removeAt(index)
+                    }
                     renderAddresses()
                 }
             }
@@ -759,7 +790,7 @@ class MainActivity : Activity() {
 
     private fun saveEditedAddresses() {
 
-        for (i in 0 until addressesContainer.childCount) {
+        for (i in addresses.indices) {
 
             val row = addressesContainer.getChildAt(i)
 
@@ -767,7 +798,7 @@ class MainActivity : Activity() {
 
                 val edit = row.getChildAt(1)
 
-                if (edit is EditText && i < addresses.size) {
+                if (edit is EditText) {
                     addresses[i] = edit.text.toString().trim()
                 }
             }
@@ -788,11 +819,246 @@ class MainActivity : Activity() {
         showAddresses(addresses.toList())
     }
 
+    // ГЕОКОДИРОВАНИЕ ЧЕРЕЗ 2ГИС
+
+    private fun geocodeAddress(address: String): GeocodeResult? {
+
+        val apiKey = BuildConfig.DGIS_API_KEY
+
+        if (apiKey.isBlank()) {
+            throw Exception("Не найден ключ DGIS_API_KEY")
+        }
+
+        val query = Uri.parse(
+            "https://catalog.api.2gis.com/3.0/items/geocode"
+        ).buildUpon()
+            .appendQueryParameter("q", address)
+            .appendQueryParameter("key", apiKey)
+            .appendQueryParameter("locale", "ru_RU")
+            .appendQueryParameter(
+                "fields",
+                "items.point,items.full_address_name"
+            )
+            .appendQueryParameter("page_size", "5")
+            .build()
+
+        val connection = URL(query.toString())
+            .openConnection() as HttpURLConnection
+
+        try {
+
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 20000
+            connection.readTimeout = 30000
+            connection.setRequestProperty(
+                "Accept",
+                "application/json"
+            )
+
+            connection.connect()
+
+            val responseCode = connection.responseCode
+
+            val responseText = if (
+                responseCode in 200..299
+            ) {
+                connection.inputStream.bufferedReader().use {
+                    it.readText()
+                }
+            } else {
+                val error = connection.errorStream
+                    ?.bufferedReader()
+                    ?.use { it.readText() }
+                    ?: ""
+
+                throw Exception(
+                    "2ГИС HTTP $responseCode: ${error.take(200)}"
+                )
+            }
+
+            val json = JSONObject(responseText)
+
+            val meta = json.optJSONObject("meta")
+
+            val apiCode = meta?.optInt("code", 200) ?: 200
+
+            if (apiCode != 200) {
+                throw Exception(
+                    "Ошибка 2ГИС: код $apiCode"
+                )
+            }
+
+            val result = json.optJSONObject("result")
+                ?: return null
+
+            val items = result.optJSONArray("items")
+                ?: return null
+
+            if (items.length() == 0) {
+                return null
+            }
+
+            for (i in 0 until items.length()) {
+
+                val item = items.optJSONObject(i)
+                    ?: continue
+
+                val point = item.optJSONObject("point")
+                    ?: continue
+
+                val longitude = point.optDouble(
+                    "lon",
+                    Double.NaN
+                )
+
+                val latitude = point.optDouble(
+                    "lat",
+                    Double.NaN
+                )
+
+                if (
+                    longitude.isFinite() &&
+                    latitude.isFinite() &&
+                    longitude in -180.0..180.0 &&
+                    latitude in -90.0..90.0
+                ) {
+
+                    val foundAddress = item.optString(
+                        "full_address_name",
+                        address
+                    )
+
+                    return GeocodeResult(
+                        address = foundAddress,
+                        longitude = longitude,
+                        latitude = latitude
+                    )
+                }
+            }
+
+            return null
+
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun geocodeAddresses() {
+
+        saveEditedAddresses()
+
+        if (addresses.isEmpty()) {
+            Toast.makeText(
+                this,
+                "Нет адресов для поиска",
+                Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+
+        val addressCopy = addresses.toList()
+
+        geocodeButton.isEnabled = false
+        photoButton.isEnabled = false
+
+        coordinatesText.text = ""
+
+        status.text = "Подключение к 2ГИС..."
+
+        executor.execute {
+
+            val results = mutableListOf<GeocodeResult>()
+            val notFound = mutableListOf<String>()
+
+            var errorMessage: String? = null
+
+            try {
+
+                for ((index, address) in addressCopy.withIndex()) {
+
+                    runOnUiThread {
+                        status.text =
+                            "Поиск адреса ${index + 1} из ${addressCopy.size}..."
+                    }
+
+                    try {
+
+                        val result = geocodeAddress(address)
+
+                        if (result != null) {
+                            results.add(result)
+                        } else {
+                            notFound.add(address)
+                        }
+
+                    } catch (e: Exception) {
+
+                        errorMessage = e.message
+                        notFound.add(address)
+                    }
+                }
+
+            } catch (e: Exception) {
+                errorMessage = e.message
+            }
+
+            runOnUiThread {
+
+                val output = StringBuilder()
+
+                output.append("СКЛАД — НАЧАЛО И КОНЕЦ МАРШРУТА\n")
+                output.append(warehouseAddress)
+                output.append("\n\n")
+
+                output.append("НАЙДЕННЫЕ АДРЕСА: ")
+                output.append(results.size)
+                output.append("\n\n")
+
+                results.forEachIndexed { index, item ->
+
+                    output.append("${index + 1}. ")
+                    output.append(item.address)
+                    output.append("\n")
+
+                    output.append("Долгота: ")
+                    output.append(item.longitude)
+                    output.append("\n")
+
+                    output.append("Широта: ")
+                    output.append(item.latitude)
+                    output.append("\n\n")
+                }
+
+                if (notFound.isNotEmpty()) {
+
+                    output.append("НЕ НАЙДЕНЫ — ПРОВЕРЬТЕ ВРУЧНУЮ:\n")
+
+                    notFound.forEachIndexed { index, address ->
+                        output.append("${index + 1}. $address\n")
+                    }
+                }
+
+                coordinatesText.text = output.toString()
+
+                status.text = if (errorMessage == null) {
+                    "Поиск завершён. Найдено: ${results.size}, не найдено: ${notFound.size}"
+                } else {
+                    "Поиск завершён с ошибкой: $errorMessage"
+                }
+
+                geocodeButton.isEnabled = addresses.isNotEmpty()
+                photoButton.isEnabled = true
+            }
+        }
+    }
+
     // РАСПОЗНАВАНИЕ ФОТОГРАФИИ
 
     private fun recognizePhoto(file: File) {
 
         photoButton.isEnabled = false
+        geocodeButton.isEnabled = false
+
         status.text = "Подготовка фотографии..."
 
         executor.execute {
