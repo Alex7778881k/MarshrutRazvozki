@@ -11,8 +11,8 @@ android {
         applicationId = "ru.marshrut.razvozki"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 4
+        versionName = "1.3"
     }
 
     compileOptions {
@@ -26,9 +26,7 @@ android {
 }
 
 dependencies {
-    // Библиотека распознавания текста Tesseract 5
     implementation("cz.adaptech.tesseract4android:tesseract4android:4.9.0")
-
-    // Поддержка FileProvider для открытия фотографий с камеры
     implementation("androidx.core:core:1.15.0")
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
 }
