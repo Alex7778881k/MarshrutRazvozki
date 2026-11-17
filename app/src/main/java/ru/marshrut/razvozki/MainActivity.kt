@@ -13,9 +13,11 @@ import android.net.Uri
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
 import com.googlecode.tesseract.android.TessBaseAPI
@@ -24,12 +26,17 @@ import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executors
+import java.util.Locale
 
 class MainActivity : Activity() {
 
     private lateinit var status: TextView
     private lateinit var result: TextView
+    private lateinit var addressesContainer: LinearLayout
     private lateinit var photoButton: Button
+    private lateinit var countText: TextView
+
+    private val addresses = mutableListOf<String>()
 
     private var photoUri: Uri? = null
     private var photoFile: File? = null
@@ -42,7 +49,7 @@ class MainActivity : Activity() {
 
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 40, 32, 24)
+            setPadding(24, 24, 24, 24)
         }
 
         val title = TextView(this).apply {
@@ -53,36 +60,66 @@ class MainActivity : Activity() {
 
         photoButton = Button(this).apply {
             text = "СФОТОГРАФИРОВАТЬ ЛИСТ"
-            textSize = 16f
             setOnClickListener { takePhoto() }
         }
 
         status = TextView(this).apply {
             text = "Сфотографируйте лист с адресами"
-            textSize = 16f
-            setPadding(0, 20, 0, 20)
-        }
-
-        result = TextView(this).apply {
-            text = "Распознанный текст появится здесь"
-            textSize = 16f
+            textSize = 15f
             setPadding(0, 12, 0, 12)
         }
 
-        val scroll = ScrollView(this).apply {
+        countText = TextView(this).apply {
+            text = "Найдено адресов: 0"
+            textSize = 19f
+            setPadding(0, 12, 0, 12)
+        }
+
+        addressesContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        val addressScroll = ScrollView(this).apply {
+            addView(addressesContainer)
+        }
+
+        result = TextView(this).apply {
+            text = ""
+            textSize = 13f
+            setPadding(0, 16, 0, 16)
+        }
+
+        val rawScroll = ScrollView(this).apply {
             addView(result)
+        }
+
+        val rawTitle = TextView(this).apply {
+            text = "Весь распознанный текст:"
+            textSize = 16f
         }
 
         layout.addView(title)
         layout.addView(photoButton)
         layout.addView(status)
+        layout.addView(countText)
 
         layout.addView(
-            scroll,
+            addressScroll,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 0,
-                1f
+                3f
+            )
+        )
+
+        layout.addView(rawTitle)
+
+        layout.addView(
+            rawScroll,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                2f
             )
         )
 
@@ -166,7 +203,6 @@ class MainActivity : Activity() {
 
         val languageFile = File(tessdata, "rus.traineddata")
 
-        // Используем более точную модель tessdata_best
         if (languageFile.exists() && languageFile.length() > 5000000) {
             return
         }
@@ -272,7 +308,6 @@ class MainActivity : Activity() {
             bitmap = rotated
         }
 
-        // Увеличиваем мелкий текст
         val maxDimension = maxOf(bitmap.width, bitmap.height)
 
         if (maxDimension < 1800) {
@@ -303,6 +338,7 @@ class MainActivity : Activity() {
         val height = source.height
 
         val pixels = IntArray(width * height)
+
         source.getPixels(
             pixels,
             0,
@@ -315,7 +351,6 @@ class MainActivity : Activity() {
 
         val histogram = IntArray(256)
 
-        // Переводим изображение в оттенки серого
         for (i in pixels.indices) {
             val color = pixels[i]
 
@@ -329,7 +364,6 @@ class MainActivity : Activity() {
                 0.114 * blue
             ).toInt()
 
-            // Повышаем контраст
             gray = ((gray - 128) * 1.35 + 128)
                 .toInt()
                 .coerceIn(0, 255)
@@ -338,7 +372,6 @@ class MainActivity : Activity() {
             histogram[gray]++
         }
 
-        // Находим порог Оцу для чёрно-белой версии
         val total = pixels.size
 
         var sum = 0L
@@ -397,7 +430,6 @@ class MainActivity : Activity() {
             height
         )
 
-        // Создаём чёрно-белую копию
         for (i in pixels.indices) {
             val gray = Color.red(pixels[i])
 
@@ -471,6 +503,197 @@ class MainActivity : Activity() {
         return bestText
     }
 
+    private fun extractAddresses(text: String): List<String> {
+
+        val lines = text
+            .replace('\r', '\n')
+            .split('\n')
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+
+        val addressWords = listOf(
+            "ул", "улица",
+            "пр", "проспект",
+            "пер", "переулок",
+            "ш", "шоссе",
+            "б-р", "бульвар",
+            "пл", "площадь",
+            "проезд",
+            "наб", "набережная",
+            "мкр", "микрорайон",
+            "д", "дом",
+            "корп", "корпус",
+            "стр", "строение",
+            "кв", "квартира"
+        )
+
+        val numberPattern = Regex(
+            """\d{1,5}\s*([а-яa-z]|\d+)?""",
+            RegexOption.IGNORE_CASE
+        )
+
+        val found = mutableListOf<String>()
+
+        for (line in lines) {
+
+            val normalized = line
+                .lowercase(Locale("ru"))
+                .replace("ё", "е")
+                .replace(Regex("""[.,;:]"""), " ")
+                .replace(Regex("""\s+"""), " ")
+                .trim()
+
+            val hasAddressWord = addressWords.any { word ->
+                Regex(
+                    """(?<![а-яa-z])${Regex.escape(word)}\.?(?![а-яa-z])""",
+                    RegexOption.IGNORE_CASE
+                ).containsMatchIn(normalized)
+            }
+
+            val hasNumber = numberPattern.containsMatchIn(normalized)
+
+            val hasStreetStructure =
+                hasAddressWord && hasNumber
+
+            val hasCityAndNumber =
+                (
+                    normalized.contains("набережные челны") ||
+                    normalized.contains("нижнекамск") ||
+                    normalized.contains("казань")
+                ) && hasNumber
+
+            if (
+                (hasStreetStructure || hasCityAndNumber) &&
+                line.length >= 5 &&
+                line.length <= 180
+            ) {
+                val cleaned = line
+                    .replace(Regex("""^[\s\-•*]+"""), "")
+                    .trim()
+
+                if (cleaned.isNotBlank()) {
+                    found.add(cleaned)
+                }
+            }
+        }
+
+        return found.distinctBy {
+            it.lowercase(Locale("ru"))
+                .replace("ё", "е")
+                .replace(Regex("""[\s.,]+"""), "")
+        }
+    }
+
+    private fun showAddresses(found: List<String>) {
+
+        addresses.clear()
+        addresses.addAll(found)
+
+        addressesContainer.removeAllViews()
+
+        countText.text = "Найдено адресов: ${addresses.size}"
+
+        if (addresses.isEmpty()) {
+            val empty = TextView(this).apply {
+                text = "Адреса не найдены. Проверьте распознанный текст."
+                textSize = 16f
+            }
+
+            addressesContainer.addView(empty)
+            return
+        }
+
+        addresses.forEachIndexed { index, address ->
+
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, 6, 0, 6)
+            }
+
+            val number = TextView(this).apply {
+                text = "${index + 1}."
+                textSize = 16f
+                setPadding(4, 0, 10, 0)
+            }
+
+            val edit = EditText(this).apply {
+                setText(address)
+                textSize = 15f
+                minLines = 1
+                maxLines = 3
+                isSingleLine = false
+            }
+
+            val delete = Button(this).apply {
+                text = "X"
+                setOnClickListener {
+                    addresses.removeAt(index)
+                    renderAddresses()
+                }
+            }
+
+            row.addView(number)
+
+            row.addView(
+                edit,
+                LinearLayout.LayoutParams(
+                    0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    1f
+                )
+            )
+
+            row.addView(delete)
+
+            addressesContainer.addView(row)
+
+            edit.setOnFocusChangeListener { _, hasFocus ->
+                if (!hasFocus && index < addresses.size) {
+                    addresses[index] = edit.text.toString().trim()
+                }
+            }
+        }
+
+        val saveButton = Button(this).apply {
+            text = "СОХРАНИТЬ ИЗМЕНЕНИЯ"
+            setOnClickListener {
+                saveEditedAddresses()
+            }
+        }
+
+        addressesContainer.addView(saveButton)
+    }
+
+    private fun saveEditedAddresses() {
+
+        for (i in 0 until addressesContainer.childCount) {
+            val row = addressesContainer.getChildAt(i)
+
+            if (row is LinearLayout && row.childCount >= 2) {
+                val edit = row.getChildAt(1)
+
+                if (edit is EditText && i < addresses.size) {
+                    addresses[i] = edit.text.toString().trim()
+                }
+            }
+        }
+
+        addresses.removeAll { it.isBlank() }
+
+        renderAddresses()
+
+        Toast.makeText(
+            this,
+            "Изменения сохранены",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    private fun renderAddresses() {
+        showAddresses(addresses.toList())
+    }
+
     private fun recognizePhoto(file: File) {
 
         photoButton.isEnabled = false
@@ -489,7 +712,7 @@ class MainActivity : Activity() {
                 directory.mkdirs()
 
                 runOnUiThread {
-                    status.text = "Загрузка улучшенной модели русского языка..."
+                    status.text = "Загрузка русского языка..."
                 }
 
                 downloadRussianLanguage(directory)
@@ -506,7 +729,7 @@ class MainActivity : Activity() {
                 binary = processed.second
 
                 runOnUiThread {
-                    status.text = "Запуск распознавания..."
+                    status.text = "Распознавание текста..."
                 }
 
                 tess = TessBaseAPI()
@@ -529,24 +752,24 @@ class MainActivity : Activity() {
                     "300"
                 )
 
-                runOnUiThread {
-                    status.text = "Проверка нескольких вариантов распознавания..."
-                }
-
                 val recognizedText = recognizeVariants(
                     tess,
                     listOf(gray, binary)
                 )
 
-                val output = if (recognizedText.isBlank()) {
-                    "Текст не распознан. Проверьте качество фотографии и попробуйте ещё раз."
-                } else {
-                    recognizedText
-                }
+                val foundAddresses = extractAddresses(recognizedText)
 
                 runOnUiThread {
-                    result.text = output
-                    status.text = "Распознавание завершено"
+                    result.text = recognizedText
+
+                    showAddresses(foundAddresses)
+
+                    status.text = if (foundAddresses.isEmpty()) {
+                        "Текст распознан, но адреса не найдены"
+                    } else {
+                        "Распознавание завершено"
+                    }
+
                     photoButton.isEnabled = true
                 }
 
