@@ -1,13 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Доступ к интернету для работы с API 2ГИС -->
     <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:allowBackup="false"
         android:label="Маршрут развозки"
+        android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
+        <!-- Передача фотографии в приложение камеры -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -20,6 +23,7 @@
 
         </provider>
 
+        <!-- Главный экран приложения -->
         <activity
             android:name="ru.marshrut.razvozki.MainActivity"
             android:exported="true">
