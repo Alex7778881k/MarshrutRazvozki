@@ -31,7 +31,6 @@ import java.util.Locale
 class MainActivity : Activity() {
 
     private lateinit var status: TextView
-    private lateinit var result: TextView
     private lateinit var addressesContainer: LinearLayout
     private lateinit var photoButton: Button
     private lateinit var countText: TextView
@@ -83,21 +82,6 @@ class MainActivity : Activity() {
             addView(addressesContainer)
         }
 
-        result = TextView(this).apply {
-            text = ""
-            textSize = 13f
-            setPadding(0, 16, 0, 16)
-        }
-
-        val rawScroll = ScrollView(this).apply {
-            addView(result)
-        }
-
-        val rawTitle = TextView(this).apply {
-            text = "Весь распознанный текст:"
-            textSize = 16f
-        }
-
         layout.addView(title)
         layout.addView(photoButton)
         layout.addView(status)
@@ -108,18 +92,7 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 0,
-                3f
-            )
-        )
-
-        layout.addView(rawTitle)
-
-        layout.addView(
-            rawScroll,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                0,
-                2f
+                1f
             )
         )
 
@@ -145,6 +118,7 @@ class MainActivity : Activity() {
             val intent = Intent(
                 android.provider.MediaStore.ACTION_IMAGE_CAPTURE
             ).apply {
+
                 putExtra(
                     android.provider.MediaStore.EXTRA_OUTPUT,
                     photoUri
@@ -180,7 +154,9 @@ class MainActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
 
         if (requestCode == cameraRequest) {
+
             if (resultCode == Activity.RESULT_OK) {
+
                 val file = photoFile
 
                 if (file != null && file.exists() && file.length() > 0) {
@@ -189,6 +165,7 @@ class MainActivity : Activity() {
                     status.text = "Камера не сохранила фотографию"
                     photoButton.isEnabled = true
                 }
+
             } else {
                 status.text = "Фотографирование отменено"
                 photoButton.isEnabled = true
@@ -291,6 +268,7 @@ class MainActivity : Activity() {
         }
 
         if (rotation != 0f) {
+
             val matrix = Matrix()
             matrix.postRotate(rotation)
 
@@ -311,6 +289,7 @@ class MainActivity : Activity() {
         val maxDimension = maxOf(bitmap.width, bitmap.height)
 
         if (maxDimension < 1800) {
+
             val scale = minOf(1.5f, 2700f / maxDimension)
 
             val enlarged = Bitmap.createScaledBitmap(
@@ -352,6 +331,7 @@ class MainActivity : Activity() {
         val histogram = IntArray(256)
 
         for (i in pixels.indices) {
+
             val color = pixels[i]
 
             val red = Color.red(color)
@@ -386,6 +366,7 @@ class MainActivity : Activity() {
         var threshold = 128
 
         for (i in 0..255) {
+
             weightBackground += histogram[i]
 
             if (weightBackground == 0) continue
@@ -431,6 +412,7 @@ class MainActivity : Activity() {
         )
 
         for (i in pixels.indices) {
+
             val gray = Color.red(pixels[i])
 
             pixels[i] = if (gray >= threshold) {
@@ -474,6 +456,7 @@ class MainActivity : Activity() {
         var bestConfidence = -1
 
         for (image in images) {
+
             for (mode in modes) {
 
                 tess.setPageSegMode(mode)
@@ -503,15 +486,20 @@ class MainActivity : Activity() {
         return bestText
     }
 
+    // НОВАЯ ЛОГИКА ОПРЕДЕЛЕНИЯ И ОБЪЕДИНЕНИЯ АДРЕСОВ
+
     private fun extractAddresses(text: String): List<String> {
 
         val lines = text
             .replace('\r', '\n')
             .split('\n')
-            .map { it.trim() }
+            .map {
+                it.replace(Regex("""^[\s\-•*]+"""), "")
+                    .trim()
+            }
             .filter { it.isNotBlank() }
 
-        val addressWords = listOf(
+        val streetWords = listOf(
             "ул", "улица",
             "пр", "проспект",
             "пер", "переулок",
@@ -520,7 +508,10 @@ class MainActivity : Activity() {
             "пл", "площадь",
             "проезд",
             "наб", "набережная",
-            "мкр", "микрорайон",
+            "мкр", "микрорайон"
+        )
+
+        val addressWords = streetWords + listOf(
             "д", "дом",
             "корп", "корпус",
             "стр", "строение",
@@ -532,57 +523,152 @@ class MainActivity : Activity() {
             RegexOption.IGNORE_CASE
         )
 
-        val found = mutableListOf<String>()
-
-        for (line in lines) {
-
-            val normalized = line
+        fun normalized(line: String): String {
+            return line
                 .lowercase(Locale("ru"))
                 .replace("ё", "е")
                 .replace(Regex("""[.,;:]"""), " ")
                 .replace(Regex("""\s+"""), " ")
                 .trim()
+        }
 
-            val hasAddressWord = addressWords.any { word ->
+        fun hasWord(line: String, words: List<String>): Boolean {
+
+            val value = normalized(line)
+
+            return words.any { word ->
                 Regex(
                     """(?<![а-яa-z])${Regex.escape(word)}\.?(?![а-яa-z])""",
                     RegexOption.IGNORE_CASE
-                ).containsMatchIn(normalized)
+                ).containsMatchIn(value)
+            }
+        }
+
+        fun hasNumber(line: String): Boolean {
+            return numberPattern.containsMatchIn(line)
+        }
+
+        fun hasCity(line: String): Boolean {
+
+            val value = normalized(line)
+
+            return value.contains("набережные челны") ||
+                value.contains("нижнекамск") ||
+                value.contains("казань")
+        }
+
+        fun isAddress(line: String): Boolean {
+
+            val street = hasWord(line, addressWords)
+            val number = hasNumber(line)
+
+            val city = hasCity(line)
+
+            return (
+                street && number ||
+                city && number
+            ) && line.length >= 5
+        }
+
+        val combinedLines = mutableListOf<String>()
+
+        var pending = ""
+
+        for (line in lines) {
+
+            if (pending.isEmpty()) {
+                pending = line
+                continue
             }
 
-            val hasNumber = numberPattern.containsMatchIn(normalized)
+            val pendingHasStreet = hasWord(pending, streetWords)
+            val pendingHasNumber = hasNumber(pending)
+            val pendingHasCity = hasCity(pending)
 
-            val hasStreetStructure =
-                hasAddressWord && hasNumber
+            val currentHasStreet = hasWord(line, streetWords)
+            val currentHasNumber = hasNumber(line)
 
-            val hasCityAndNumber =
-                (
-                    normalized.contains("набережные челны") ||
-                    normalized.contains("нижнекамск") ||
-                    normalized.contains("казань")
-                ) && hasNumber
+            // Если предыдущая строка уже содержит законченный адрес,
+            // начинаем формировать следующий адрес.
 
-            if (
-                (hasStreetStructure || hasCityAndNumber) &&
-                line.length >= 5 &&
-                line.length <= 180
-            ) {
+            val pendingComplete =
+                pendingHasStreet && pendingHasNumber ||
+                pendingHasCity && pendingHasNumber
+
+            if (pendingComplete) {
+
+                combinedLines.add(pending)
+                pending = line
+                continue
+            }
+
+            // Не объединяем два разных названия улиц.
+
+            if (pendingHasStreet && currentHasStreet) {
+
+                combinedLines.add(pending)
+                pending = line
+                continue
+            }
+
+            // Объединяем город и улицу либо улицу и номер дома.
+
+            val canJoin =
+                pendingHasCity && currentHasStreet ||
+                pendingHasStreet && currentHasNumber ||
+                pendingHasStreet && currentHasStreet ||
+                pendingHasCity && currentHasNumber ||
+                hasWord(pending, addressWords) && currentHasNumber
+
+            if (canJoin && pending.length + line.length < 180) {
+
+                pending = "$pending, $line"
+
+            } else {
+
+                combinedLines.add(pending)
+                pending = line
+            }
+        }
+
+        if (pending.isNotEmpty()) {
+            combinedLines.add(pending)
+        }
+
+        val found = mutableListOf<String>()
+
+        for (line in combinedLines) {
+
+            if (isAddress(line)) {
+
                 val cleaned = line
-                    .replace(Regex("""^[\s\-•*]+"""), "")
+                    .replace(
+                        Regex("""^[\s\-•*]+"""),
+                        ""
+                    )
+                    .replace(Regex("""\s+"""), " ")
                     .trim()
+                    .trim(',', ';')
 
-                if (cleaned.isNotBlank()) {
+                if (
+                    cleaned.isNotBlank() &&
+                    cleaned.length >= 5 &&
+                    cleaned.length <= 180
+                ) {
                     found.add(cleaned)
                 }
             }
         }
 
         return found.distinctBy {
-            it.lowercase(Locale("ru"))
-                .replace("ё", "е")
-                .replace(Regex("""[\s.,]+"""), "")
+            normalized(it).replace(
+                Regex("""[\s.,]+"""),
+                ""
+            )
         }
     }
+
+    // ОТОБРАЖЕНИЕ ТОЛЬКО АДРЕСОВ
 
     private fun showAddresses(found: List<String>) {
 
@@ -594,9 +680,11 @@ class MainActivity : Activity() {
         countText.text = "Найдено адресов: ${addresses.size}"
 
         if (addresses.isEmpty()) {
+
             val empty = TextView(this).apply {
-                text = "Адреса не найдены. Проверьте распознанный текст."
+                text = "Адреса не найдены. Попробуйте сфотографировать лист ещё раз."
                 textSize = 16f
+                setPadding(0, 16, 0, 16)
             }
 
             addressesContainer.addView(empty)
@@ -627,6 +715,7 @@ class MainActivity : Activity() {
 
             val delete = Button(this).apply {
                 text = "X"
+
                 setOnClickListener {
                     addresses.removeAt(index)
                     renderAddresses()
@@ -649,6 +738,7 @@ class MainActivity : Activity() {
             addressesContainer.addView(row)
 
             edit.setOnFocusChangeListener { _, hasFocus ->
+
                 if (!hasFocus && index < addresses.size) {
                     addresses[index] = edit.text.toString().trim()
                 }
@@ -656,7 +746,9 @@ class MainActivity : Activity() {
         }
 
         val saveButton = Button(this).apply {
+
             text = "СОХРАНИТЬ ИЗМЕНЕНИЯ"
+
             setOnClickListener {
                 saveEditedAddresses()
             }
@@ -668,9 +760,11 @@ class MainActivity : Activity() {
     private fun saveEditedAddresses() {
 
         for (i in 0 until addressesContainer.childCount) {
+
             val row = addressesContainer.getChildAt(i)
 
             if (row is LinearLayout && row.childCount >= 2) {
+
                 val edit = row.getChildAt(1)
 
                 if (edit is EditText && i < addresses.size) {
@@ -694,11 +788,12 @@ class MainActivity : Activity() {
         showAddresses(addresses.toList())
     }
 
+    // РАСПОЗНАВАНИЕ ФОТОГРАФИИ
+
     private fun recognizePhoto(file: File) {
 
         photoButton.isEnabled = false
         status.text = "Подготовка фотографии..."
-        result.text = ""
 
         executor.execute {
 
@@ -708,6 +803,7 @@ class MainActivity : Activity() {
             var tess: TessBaseAPI? = null
 
             try {
+
                 val directory = File(filesDir, "tesseract")
                 directory.mkdirs()
 
@@ -729,7 +825,7 @@ class MainActivity : Activity() {
                 binary = processed.second
 
                 runOnUiThread {
-                    status.text = "Распознавание текста..."
+                    status.text = "Распознавание адресов..."
                 }
 
                 tess = TessBaseAPI()
@@ -760,12 +856,11 @@ class MainActivity : Activity() {
                 val foundAddresses = extractAddresses(recognizedText)
 
                 runOnUiThread {
-                    result.text = recognizedText
 
                     showAddresses(foundAddresses)
 
                     status.text = if (foundAddresses.isEmpty()) {
-                        "Текст распознан, но адреса не найдены"
+                        "Адреса не найдены"
                     } else {
                         "Распознавание завершено"
                     }
@@ -781,6 +876,7 @@ class MainActivity : Activity() {
                 }
 
             } finally {
+
                 tess?.recycle()
                 original?.recycle()
                 gray?.recycle()
