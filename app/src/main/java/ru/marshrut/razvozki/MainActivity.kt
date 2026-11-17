@@ -1,3 +1,4 @@
+
 package ru.marshrut.razvozki
 
 import android.app.Activity
@@ -6,6 +7,8 @@ import android.content.Intent
 import android.content.ClipData
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Color
+import android.graphics.Matrix
 import android.net.Uri
 import android.view.Gravity
 import android.view.ViewGroup
@@ -14,6 +17,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.core.content.FileProvider
+import androidx.exifinterface.media.ExifInterface
 import com.googlecode.tesseract.android.TessBaseAPI
 import java.io.File
 import java.io.FileOutputStream
@@ -87,14 +91,11 @@ class MainActivity : Activity() {
 
     private fun takePhoto() {
         try {
-            val cameraDirectory = File(cacheDir, "camera")
-
-            if (!cameraDirectory.exists()) {
-                cameraDirectory.mkdirs()
-            }
+            val directory = File(cacheDir, "camera")
+            directory.mkdirs()
 
             photoFile = File(
-                cameraDirectory,
+                directory,
                 "photo_${System.currentTimeMillis()}.jpg"
             )
 
@@ -107,7 +108,6 @@ class MainActivity : Activity() {
             val intent = Intent(
                 android.provider.MediaStore.ACTION_IMAGE_CAPTURE
             ).apply {
-
                 putExtra(
                     android.provider.MediaStore.EXTRA_OUTPUT,
                     photoUri
@@ -143,9 +143,7 @@ class MainActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
 
         if (requestCode == cameraRequest) {
-
             if (resultCode == Activity.RESULT_OK) {
-
                 val file = photoFile
 
                 if (file != null && file.exists() && file.length() > 0) {
@@ -154,7 +152,6 @@ class MainActivity : Activity() {
                     status.text = "Камера не сохранила фотографию"
                     photoButton.isEnabled = true
                 }
-
             } else {
                 status.text = "Фотографирование отменено"
                 photoButton.isEnabled = true
@@ -169,7 +166,8 @@ class MainActivity : Activity() {
 
         val languageFile = File(tessdata, "rus.traineddata")
 
-        if (languageFile.exists() && languageFile.length() > 1000000) {
+        // Используем более точную модель tessdata_best
+        if (languageFile.exists() && languageFile.length() > 5000000) {
             return
         }
 
@@ -178,12 +176,12 @@ class MainActivity : Activity() {
         val temporaryFile = File(tessdata, "rus.tmp")
 
         val connection = URL(
-            "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/rus.traineddata"
+            "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/main/rus.traineddata"
         ).openConnection() as HttpURLConnection
 
         try {
-            connection.connectTimeout = 20000
-            connection.readTimeout = 60000
+            connection.connectTimeout = 30000
+            connection.readTimeout = 120000
             connection.connect()
 
             if (connection.responseCode != HttpURLConnection.HTTP_OK) {
@@ -198,8 +196,8 @@ class MainActivity : Activity() {
                 }
             }
 
-            if (temporaryFile.length() < 1000000) {
-                throw Exception("Русский языковой файл повреждён")
+            if (temporaryFile.length() < 5000000) {
+                throw Exception("Русский языковой файл загружен не полностью")
             }
 
             if (!temporaryFile.renameTo(languageFile)) {
@@ -211,15 +209,279 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun loadOrientedBitmap(file: File): Bitmap {
+
+        val bounds = BitmapFactory.Options().apply {
+            inJustDecodeBounds = true
+        }
+
+        BitmapFactory.decodeFile(file.absolutePath, bounds)
+
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            throw Exception("Не удалось прочитать фотографию")
+        }
+
+        var sample = 1
+
+        while (
+            bounds.outWidth / sample > 1800 ||
+            bounds.outHeight / sample > 1800
+        ) {
+            sample *= 2
+        }
+
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = sample
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+
+        var bitmap = BitmapFactory.decodeFile(
+            file.absolutePath,
+            options
+        ) ?: throw Exception("Не удалось открыть фотографию")
+
+        val exif = ExifInterface(file.absolutePath)
+
+        val orientation = exif.getAttributeInt(
+            ExifInterface.TAG_ORIENTATION,
+            ExifInterface.ORIENTATION_NORMAL
+        )
+
+        val rotation = when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+            ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+            ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+            else -> 0f
+        }
+
+        if (rotation != 0f) {
+            val matrix = Matrix()
+            matrix.postRotate(rotation)
+
+            val rotated = Bitmap.createBitmap(
+                bitmap,
+                0,
+                0,
+                bitmap.width,
+                bitmap.height,
+                matrix,
+                true
+            )
+
+            bitmap.recycle()
+            bitmap = rotated
+        }
+
+        // Увеличиваем мелкий текст
+        val maxDimension = maxOf(bitmap.width, bitmap.height)
+
+        if (maxDimension < 1800) {
+            val scale = minOf(1.5f, 2700f / maxDimension)
+
+            val enlarged = Bitmap.createScaledBitmap(
+                bitmap,
+                (bitmap.width * scale).toInt(),
+                (bitmap.height * scale).toInt(),
+                true
+            )
+
+            if (enlarged !== bitmap) {
+                bitmap.recycle()
+            }
+
+            bitmap = enlarged
+        }
+
+        return bitmap
+    }
+
+    private fun createProcessedImages(
+        source: Bitmap
+    ): Pair<Bitmap, Bitmap> {
+
+        val width = source.width
+        val height = source.height
+
+        val pixels = IntArray(width * height)
+        source.getPixels(
+            pixels,
+            0,
+            width,
+            0,
+            0,
+            width,
+            height
+        )
+
+        val histogram = IntArray(256)
+
+        // Переводим изображение в оттенки серого
+        for (i in pixels.indices) {
+            val color = pixels[i]
+
+            val red = Color.red(color)
+            val green = Color.green(color)
+            val blue = Color.blue(color)
+
+            var gray = (
+                0.299 * red +
+                0.587 * green +
+                0.114 * blue
+            ).toInt()
+
+            // Повышаем контраст
+            gray = ((gray - 128) * 1.35 + 128)
+                .toInt()
+                .coerceIn(0, 255)
+
+            pixels[i] = Color.rgb(gray, gray, gray)
+            histogram[gray]++
+        }
+
+        // Находим порог Оцу для чёрно-белой версии
+        val total = pixels.size
+
+        var sum = 0L
+
+        for (i in 0..255) {
+            sum += i.toLong() * histogram[i]
+        }
+
+        var sumBackground = 0L
+        var weightBackground = 0
+        var maximumVariance = 0.0
+        var threshold = 128
+
+        for (i in 0..255) {
+            weightBackground += histogram[i]
+
+            if (weightBackground == 0) continue
+
+            val weightForeground = total - weightBackground
+
+            if (weightForeground == 0) break
+
+            sumBackground += i.toLong() * histogram[i]
+
+            val meanBackground =
+                sumBackground.toDouble() / weightBackground
+
+            val meanForeground =
+                (sum - sumBackground).toDouble() / weightForeground
+
+            val variance =
+                weightBackground.toDouble() *
+                weightForeground.toDouble() *
+                (meanBackground - meanForeground) *
+                (meanBackground - meanForeground)
+
+            if (variance > maximumVariance) {
+                maximumVariance = variance
+                threshold = i
+            }
+        }
+
+        val grayBitmap = Bitmap.createBitmap(
+            width,
+            height,
+            Bitmap.Config.ARGB_8888
+        )
+
+        grayBitmap.setPixels(
+            pixels,
+            0,
+            width,
+            0,
+            0,
+            width,
+            height
+        )
+
+        // Создаём чёрно-белую копию
+        for (i in pixels.indices) {
+            val gray = Color.red(pixels[i])
+
+            pixels[i] = if (gray >= threshold) {
+                Color.WHITE
+            } else {
+                Color.BLACK
+            }
+        }
+
+        val binaryBitmap = Bitmap.createBitmap(
+            width,
+            height,
+            Bitmap.Config.ARGB_8888
+        )
+
+        binaryBitmap.setPixels(
+            pixels,
+            0,
+            width,
+            0,
+            0,
+            width,
+            height
+        )
+
+        return Pair(grayBitmap, binaryBitmap)
+    }
+
+    private fun recognizeVariants(
+        tess: TessBaseAPI,
+        images: List<Bitmap>
+    ): String {
+
+        val modes = intArrayOf(
+            TessBaseAPI.PageSegMode.PSM_AUTO,
+            TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK,
+            TessBaseAPI.PageSegMode.PSM_SINGLE_COLUMN
+        )
+
+        var bestText = ""
+        var bestConfidence = -1
+
+        for (image in images) {
+            for (mode in modes) {
+
+                tess.setPageSegMode(mode)
+                tess.setImage(image)
+
+                val text = tess.getUTF8Text() ?: ""
+                val confidence = tess.meanConfidence()
+
+                val cleaned = text.trim()
+
+                if (
+                    cleaned.isNotEmpty() &&
+                    (
+                        confidence > bestConfidence ||
+                        (
+                            confidence == bestConfidence &&
+                            cleaned.length > bestText.length
+                        )
+                    )
+                ) {
+                    bestConfidence = confidence
+                    bestText = cleaned
+                }
+            }
+        }
+
+        return bestText
+    }
+
     private fun recognizePhoto(file: File) {
 
         photoButton.isEnabled = false
-        status.text = "Подготовка распознавания..."
+        status.text = "Подготовка фотографии..."
         result.text = ""
 
         executor.execute {
 
-            var bitmap: Bitmap? = null
+            var original: Bitmap? = null
+            var gray: Bitmap? = null
+            var binary: Bitmap? = null
             var tess: TessBaseAPI? = null
 
             try {
@@ -227,42 +489,21 @@ class MainActivity : Activity() {
                 directory.mkdirs()
 
                 runOnUiThread {
-                    status.text = "Проверка русского языка..."
+                    status.text = "Загрузка улучшенной модели русского языка..."
                 }
 
                 downloadRussianLanguage(directory)
 
                 runOnUiThread {
-                    status.text = "Загрузка фотографии..."
+                    status.text = "Обработка фотографии..."
                 }
 
-                val bounds = BitmapFactory.Options().apply {
-                    inJustDecodeBounds = true
-                }
+                original = loadOrientedBitmap(file)
 
-                BitmapFactory.decodeFile(file.absolutePath, bounds)
+                val processed = createProcessedImages(original)
 
-                if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
-                    throw Exception("Фотография повреждена или пуста")
-                }
-
-                var sampleSize = 1
-
-                while (
-                    bounds.outWidth / sampleSize > 2500 ||
-                    bounds.outHeight / sampleSize > 2500
-                ) {
-                    sampleSize *= 2
-                }
-
-                val options = BitmapFactory.Options().apply {
-                    inSampleSize = sampleSize
-                }
-
-                bitmap = BitmapFactory.decodeFile(
-                    file.absolutePath,
-                    options
-                ) ?: throw Exception("Не удалось прочитать фотографию")
+                gray = processed.first
+                binary = processed.second
 
                 runOnUiThread {
                     status.text = "Запуск распознавания..."
@@ -270,36 +511,42 @@ class MainActivity : Activity() {
 
                 tess = TessBaseAPI()
 
-                if (!tess.init(directory.absolutePath, "rus")) {
+                if (!tess.init(
+                    directory.absolutePath,
+                    "rus",
+                    TessBaseAPI.OEM_LSTM_ONLY
+                )) {
                     throw Exception("Не удалось запустить Tesseract")
                 }
 
-                tess.setPageSegMode(
-                    TessBaseAPI.PageSegMode.PSM_AUTO
+                tess.setVariable(
+                    "preserve_interword_spaces",
+                    "1"
                 )
 
-                tess.setImage(bitmap)
+                tess.setVariable(
+                    "user_defined_dpi",
+                    "300"
+                )
 
                 runOnUiThread {
-                    status.text = "Распознавание текста..."
+                    status.text = "Проверка нескольких вариантов распознавания..."
                 }
 
-                val recognizedText = tess.getUTF8Text() ?: ""
+                val recognizedText = recognizeVariants(
+                    tess,
+                    listOf(gray, binary)
+                )
 
-                val lines = recognizedText
-                    .lines()
-                    .map { it.trim() }
-                    .filter { it.isNotBlank() }
-
-                val outputText = if (lines.isEmpty()) {
-                    "Текст не распознан. Попробуйте сделать более чёткую фотографию."
+                val output = if (recognizedText.isBlank()) {
+                    "Текст не распознан. Проверьте качество фотографии и попробуйте ещё раз."
                 } else {
-                    lines.joinToString("\n")
+                    recognizedText
                 }
 
                 runOnUiThread {
+                    result.text = output
                     status.text = "Распознавание завершено"
-                    result.text = outputText
                     photoButton.isEnabled = true
                 }
 
@@ -312,7 +559,9 @@ class MainActivity : Activity() {
 
             } finally {
                 tess?.recycle()
-                bitmap?.recycle()
+                original?.recycle()
+                gray?.recycle()
+                binary?.recycle()
             }
         }
     }
