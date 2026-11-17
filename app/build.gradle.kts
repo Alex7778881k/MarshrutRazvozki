@@ -1,4 +1,3 @@
-
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -27,5 +26,9 @@ android {
 }
 
 dependencies {
+    // Библиотека распознавания текста Tesseract 5
     implementation("cz.adaptech.tesseract4android:tesseract4android:4.9.0")
+
+    // Поддержка FileProvider для открытия фотографий с камеры
+    implementation("androidx.core:core:1.15.0")
 }
