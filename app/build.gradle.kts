@@ -12,8 +12,8 @@ android {
         applicationId = "ru.marshrut.razvozki"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
     }
 
     compileOptions {
@@ -24,4 +24,8 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+}
+
+dependencies {
+    implementation("com.rmtheis:tess-two:9.1.0")
 }
