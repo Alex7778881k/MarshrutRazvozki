@@ -4,17 +4,18 @@ package ru.marshrut.razvozki
 import android.app.Activity
 import android.os.Bundle
 import android.content.Intent
-import android.content.ContentValues
+import android.content.ClipData
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
-import android.provider.MediaStore
+import android.os.Environment
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.core.content.FileProvider
 import com.googlecode.tesseract.android.TessBaseAPI
 import java.io.File
 import java.io.FileOutputStream
@@ -29,6 +30,7 @@ class MainActivity : Activity() {
     private lateinit var photoButton: Button
 
     private var photoUri: Uri? = null
+    private var photoFile: File? = null
 
     private val executor = Executors.newSingleThreadExecutor()
     private val cameraRequest = 1001
@@ -50,9 +52,7 @@ class MainActivity : Activity() {
         photoButton = Button(this).apply {
             text = "СФОТОГРАФИРОВАТЬ ЛИСТ"
             textSize = 16f
-            setOnClickListener {
-                takePhoto()
-            }
+            setOnClickListener { takePhoto() }
         }
 
         status = TextView(this).apply {
@@ -89,26 +89,38 @@ class MainActivity : Activity() {
 
     private fun takePhoto() {
         try {
-            val values = ContentValues().apply {
-                put(
-                    MediaStore.Images.Media.DISPLAY_NAME,
-                    "marshrut_${System.currentTimeMillis()}.jpg"
-                )
-                put(
-                    MediaStore.Images.Media.MIME_TYPE,
-                    "image/jpeg"
-                )
+            val cameraDirectory = File(cacheDir, "camera")
+            if (!cameraDirectory.exists()) {
+                cameraDirectory.mkdirs()
             }
 
-            photoUri = contentResolver.insert(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                values
-            ) ?: throw Exception("Не удалось создать файл фотографии")
+            photoFile = File(
+                cameraDirectory,
+                "photo_${System.currentTimeMillis()}.jpg"
+            )
 
-            val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
-                putExtra(MediaStore.EXTRA_OUTPUT, photoUri)
-                addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            photoUri = FileProvider.getUriForFile(
+                this,
+                "$packageName.fileprovider",
+                photoFile!!
+            )
+
+            val intent = Intent(
+                android.provider.MediaStore.ACTION_IMAGE_CAPTURE
+            ).apply {
+                putExtra(
+                    android.provider.MediaStore.EXTRA_OUTPUT,
+                    photoUri
+                )
+
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+
+                clipData = ClipData.newUri(
+                    contentResolver,
+                    "Фотография листа",
+                    photoUri
+                )
             }
 
             if (intent.resolveActivity(packageManager) == null) {
@@ -133,12 +145,14 @@ class MainActivity : Activity() {
         if (requestCode == cameraRequest) {
 
             if (resultCode == Activity.RESULT_OK) {
-                val uri = photoUri
 
-                if (uri != null) {
-                    recognizePhoto(uri)
+                val file = photoFile
+
+                if (file != null && file.exists() && file.length() > 0) {
+                    recognizePhoto(file)
                 } else {
-                    status.text = "Фотография не найдена"
+                    status.text = "Камера не сохранила фотографию"
+                    photoButton.isEnabled = true
                 }
 
             } else {
@@ -151,15 +165,9 @@ class MainActivity : Activity() {
     private fun downloadRussianLanguage(directory: File) {
 
         val tessdata = File(directory, "tessdata")
+        tessdata.mkdirs()
 
-        if (!tessdata.exists()) {
-            tessdata.mkdirs()
-        }
-
-        val languageFile = File(
-            tessdata,
-            "rus.traineddata"
-        )
+        val languageFile = File(tessdata, "rus.traineddata")
 
         if (languageFile.exists() && languageFile.length() > 1000000) {
             return
@@ -167,10 +175,7 @@ class MainActivity : Activity() {
 
         languageFile.delete()
 
-        val temporaryFile = File(
-            tessdata,
-            "rus.traineddata.tmp"
-        )
+        val temporaryFile = File(tessdata, "rus.tmp")
 
         val connection = URL(
             "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/rus.traineddata"
@@ -179,7 +184,6 @@ class MainActivity : Activity() {
         try {
             connection.connectTimeout = 20000
             connection.readTimeout = 60000
-            connection.requestMethod = "GET"
             connection.connect()
 
             if (connection.responseCode != HttpURLConnection.HTTP_OK) {
@@ -207,7 +211,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun recognizePhoto(uri: Uri) {
+    private fun recognizePhoto(file: File) {
 
         photoButton.isEnabled = false
         status.text = "Подготовка распознавания..."
@@ -219,15 +223,8 @@ class MainActivity : Activity() {
             var tess: TessBaseAPI? = null
 
             try {
-
-                val directory = File(
-                    filesDir,
-                    "tesseract"
-                )
-
-                if (!directory.exists()) {
-                    directory.mkdirs()
-                }
+                val directory = File(filesDir, "tesseract")
+                directory.mkdirs()
 
                 runOnUiThread {
                     status.text = "Проверка русского языка..."
@@ -243,9 +240,7 @@ class MainActivity : Activity() {
                     inJustDecodeBounds = true
                 }
 
-                contentResolver.openInputStream(uri)?.use {
-                    BitmapFactory.decodeStream(it, null, bounds)
-                } ?: throw Exception("Не удалось открыть фотографию")
+                BitmapFactory.decodeFile(file.absolutePath, bounds)
 
                 var sampleSize = 1
 
@@ -260,9 +255,10 @@ class MainActivity : Activity() {
                     inSampleSize = sampleSize
                 }
 
-                bitmap = contentResolver.openInputStream(uri)?.use {
-                    BitmapFactory.decodeStream(it, null, options)
-                } ?: throw Exception("Не удалось прочитать изображение")
+                bitmap = BitmapFactory.decodeFile(
+                    file.absolutePath,
+                    options
+                ) ?: throw Exception("Не удалось прочитать фотографию")
 
                 runOnUiThread {
                     status.text = "Запуск распознавания..."
@@ -270,15 +266,8 @@ class MainActivity : Activity() {
 
                 tess = TessBaseAPI()
 
-                val initialized = tess.init(
-                    directory.absolutePath,
-                    "rus"
-                )
-
-                if (!initialized) {
-                    throw Exception(
-                        "Tesseract не смог загрузить русский язык. Проверьте файл rus.traineddata"
-                    )
+                if (!tess.init(directory.absolutePath, "rus")) {
+                    throw Exception("Не удалось запустить Tesseract")
                 }
 
                 tess.setPageSegMode(
@@ -318,7 +307,6 @@ class MainActivity : Activity() {
                 }
 
             } finally {
-
                 tess?.recycle()
                 bitmap?.recycle()
             }
