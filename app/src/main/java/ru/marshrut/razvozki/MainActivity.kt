@@ -1,4 +1,3 @@
-
 package ru.marshrut.razvozki
 
 import android.app.Activity
@@ -8,7 +7,6 @@ import android.content.ClipData
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
-import android.os.Environment
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
@@ -90,6 +88,7 @@ class MainActivity : Activity() {
     private fun takePhoto() {
         try {
             val cameraDirectory = File(cacheDir, "camera")
+
             if (!cameraDirectory.exists()) {
                 cameraDirectory.mkdirs()
             }
@@ -108,6 +107,7 @@ class MainActivity : Activity() {
             val intent = Intent(
                 android.provider.MediaStore.ACTION_IMAGE_CAPTURE
             ).apply {
+
                 putExtra(
                     android.provider.MediaStore.EXTRA_OUTPUT,
                     photoUri
@@ -241,6 +241,10 @@ class MainActivity : Activity() {
                 }
 
                 BitmapFactory.decodeFile(file.absolutePath, bounds)
+
+                if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                    throw Exception("Фотография повреждена или пуста")
+                }
 
                 var sampleSize = 1
 
