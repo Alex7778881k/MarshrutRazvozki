@@ -49,7 +49,7 @@ class MainActivity : Activity() {
     private val cameraRequest = 1001
 
     private val warehouseAddress =
-        "Индустриальный проезд, 22/1, 423800, Набережные Челны, Республика Татарстан, Россия"
+        "423800, Россия, Республика Татарстан, Набережные Челны, Центральный район, Индустриальный проезд, 22/1"
 
     data class GeocodeResult(
         val address: String,
@@ -289,8 +289,8 @@ class MainActivity : Activity() {
         var sample = 1
 
         while (
-            bounds.outWidth / sample > 1800 ||
-            bounds.outHeight / sample > 1800
+            bounds.outWidth / sample > 2600 ||
+            bounds.outHeight / sample > 2600
         ) {
             sample *= 2
         }
@@ -340,9 +340,9 @@ class MainActivity : Activity() {
 
         val maxDimension = maxOf(bitmap.width, bitmap.height)
 
-        if (maxDimension < 1800) {
+        if (maxDimension < 2600) {
 
-            val scale = minOf(1.5f, 2700f / maxDimension)
+            val scale = minOf(1.35f, 2600f / maxDimension)
 
             val enlarged = Bitmap.createScaledBitmap(
                 bitmap,
@@ -505,32 +505,31 @@ class MainActivity : Activity() {
         )
 
         var bestText = ""
-        var bestConfidence = -1
+        var bestScore = Int.MIN_VALUE
 
         for (image in images) {
-
             for (mode in modes) {
-
                 tess.setPageSegMode(mode)
                 tess.setImage(image)
 
-                val text = tess.getUTF8Text() ?: ""
+                val text = (tess.getUTF8Text() ?: "").trim()
+                if (text.isBlank()) continue
+
                 val confidence = tess.meanConfidence()
+                val addressCount = extractAddresses(text).size
+                val usefulLines = text.lines().count { line ->
+                    line.any { it.isLetterOrDigit() }
+                }
 
-                val cleaned = text.trim()
+                val score = addressCount * 1000 +
+                    confidence * 2 +
+                    usefulLines.coerceAtMost(100)
 
-                if (
-                    cleaned.isNotEmpty() &&
-                    (
-                        confidence > bestConfidence ||
-                        (
-                            confidence == bestConfidence &&
-                            cleaned.length > bestText.length
-                        )
-                    )
+                if (score > bestScore ||
+                    (score == bestScore && text.length > bestText.length)
                 ) {
-                    bestConfidence = confidence
-                    bestText = cleaned
+                    bestScore = score
+                    bestText = text
                 }
             }
         }
@@ -556,9 +555,11 @@ class MainActivity : Activity() {
             "ш", "шоссе",
             "б-р", "бульвар",
             "пл", "площадь",
-            "проезд",
+            "проезд", "пр-д",
             "наб", "набережная",
-            "мкр", "микрорайон"
+            "мкр", "микрорайон",
+            "тер", "территория",
+            "тракт"
         )
 
         val addressWords = streetWords + listOf(
@@ -602,9 +603,19 @@ class MainActivity : Activity() {
 
             val value = normalized(line)
 
-            return value.contains("набережные челны") ||
-                value.contains("нижнекамск") ||
-                value.contains("казань")
+            return listOf(
+                "набережные челны",
+                "нижнекамск",
+                "казань",
+                "елабуга",
+                "менделеевск",
+                "мамадыш",
+                "заинск",
+                "альметьевск",
+                "ижевск",
+                "москву",
+                "москва"
+            ).any { value.contains(it) }
         }
 
         fun isAddress(line: String): Boolean {
@@ -856,124 +867,149 @@ class MainActivity : Activity() {
     private fun geocodeAddress(address: String): GeocodeResult? {
 
         val apiKey = BuildConfig.DGIS_API_KEY
-
         if (apiKey.isBlank()) {
             throw Exception("Не найден ключ DGIS_API_KEY")
         }
 
-        val query = Uri.parse(
-            "https://catalog.api.2gis.com/3.0/items/geocode"
-        ).buildUpon()
-            .appendQueryParameter("q", address)
-            .appendQueryParameter("key", apiKey)
-            .appendQueryParameter("locale", "ru_RU")
-            .appendQueryParameter(
-                "fields",
-                "items.point,items.full_address_name"
-            )
-            .appendQueryParameter("page_size", "5")
-            .build()
+        val normalizedInput = address.lowercase(Locale("ru"))
+            .replace("ё", "е")
+            .replace(Regex("""[^а-яa-z0-9/ -]"""), " ")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
 
-        val connection = URL(query.toString())
-            .openConnection() as HttpURLConnection
+        val cityNames = listOf(
+            "набережные челны", "нижнекамск", "казань", "елабуга",
+            "менделеевск", "мамадыш", "заинск", "альметьевск",
+            "ижевск", "москва"
+        )
+        val hasCity = cityNames.any { normalizedInput.contains(it) }
 
-        try {
-
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 20000
-            connection.readTimeout = 30000
-
-            connection.setRequestProperty(
-                "Accept",
-                "application/json"
-            )
-
-            connection.connect()
-
-            val responseCode = connection.responseCode
-
-            val responseText = if (
-                responseCode in 200..299
+        val queries = buildList {
+            add(address.trim())
+            if (!hasCity &&
+                !normalizedInput.contains("республика") &&
+                !normalizedInput.contains("татарстан")
             ) {
-                connection.inputStream.bufferedReader().use {
-                    it.readText()
+                add("$address, Набережные Челны, Республика Татарстан")
+            }
+        }.distinct()
+
+        val houseMatches = Regex(
+            """\b\d{1,5}(?:\s*[/\-]\s*\d{1,5})?\s*[а-яa-z]?\b""",
+            RegexOption.IGNORE_CASE
+        ).findAll(normalizedInput)
+            .map { it.value.replace(Regex("""\s+"""), "").lowercase(Locale("ru")) }
+            .toList()
+
+        val streetTokens = normalizedInput
+            .split(Regex("""[^а-яa-z0-9]+"""))
+            .filter { it.length >= 3 && it !in setOf(
+                "улица", "проезд", "проспект", "переулок", "шоссе",
+                "бульвар", "набережная", "микрорайон", "дом",
+                "корпус", "строение", "квартира", "набережные",
+                "челны", "республика", "татарстан", "россия"
+            ) }
+            .distinct()
+
+        var best: GeocodeResult? = null
+        var bestScore = Int.MIN_VALUE
+
+        for (searchText in queries) {
+            val requestUrl = Uri.parse(
+                "https://catalog.api.2gis.com/3.0/items/geocode"
+            ).buildUpon()
+                .appendQueryParameter("q", searchText)
+                .appendQueryParameter("key", apiKey)
+                .appendQueryParameter("locale", "ru_RU")
+                .appendQueryParameter(
+                    "fields",
+                    "items.point,items.full_address_name"
+                )
+                .appendQueryParameter("page_size", "10")
+                .build()
+
+            val connection = URL(requestUrl.toString())
+                .openConnection() as HttpURLConnection
+
+            try {
+                connection.requestMethod = "GET"
+                connection.connectTimeout = 20000
+                connection.readTimeout = 30000
+                connection.setRequestProperty("Accept", "application/json")
+                connection.connect()
+
+                val responseCode = connection.responseCode
+                val responseText = if (responseCode in 200..299) {
+                    connection.inputStream.bufferedReader().use { it.readText() }
+                } else {
+                    val error = connection.errorStream
+                        ?.bufferedReader()
+                        ?.use { it.readText() } ?: ""
+                    throw Exception("2ГИС HTTP $responseCode: ${error.take(200)}")
                 }
-            } else {
-                val error = connection.errorStream
-                    ?.bufferedReader()
-                    ?.use { it.readText() }
-                    ?: ""
 
-                throw Exception(
-                    "2ГИС HTTP $responseCode: ${error.take(200)}"
-                )
-            }
+                val json = JSONObject(responseText)
+                val apiCode = json.optJSONObject("meta")?.optInt("code", 200) ?: 200
+                if (apiCode != 200) {
+                    throw Exception("Ошибка 2ГИС: код $apiCode")
+                }
 
-            val json = JSONObject(responseText)
-
-            val meta = json.optJSONObject("meta")
-
-            val apiCode = meta?.optInt("code", 200) ?: 200
-
-            if (apiCode != 200) {
-                throw Exception(
-                    "Ошибка 2ГИС: код $apiCode"
-                )
-            }
-
-            val result = json.optJSONObject("result")
-                ?: return null
-
-            val items = result.optJSONArray("items")
-                ?: return null
-
-            if (items.length() == 0) {
-                return null
-            }
-
-            for (i in 0 until items.length()) {
-
-                val item = items.optJSONObject(i)
+                val items = json.optJSONObject("result")?.optJSONArray("items")
                     ?: continue
 
-                val point = item.optJSONObject("point")
-                    ?: continue
+                for (i in 0 until items.length()) {
+                    val item = items.optJSONObject(i) ?: continue
+                    val point = item.optJSONObject("point") ?: continue
+                    val longitude = point.optDouble("lon", Double.NaN)
+                    val latitude = point.optDouble("lat", Double.NaN)
 
-                val longitude = point.optDouble(
-                    "lon",
-                    Double.NaN
-                )
+                    if (!longitude.isFinite() || !latitude.isFinite() ||
+                        longitude !in -180.0..180.0 || latitude !in -90.0..90.0
+                    ) continue
 
-                val latitude = point.optDouble(
-                    "lat",
-                    Double.NaN
-                )
+                    val foundAddress = item.optString("full_address_name", "").trim()
+                    if (foundAddress.isBlank()) continue
 
-                if (
-                    longitude.isFinite() &&
-                    latitude.isFinite() &&
-                    longitude in -180.0..180.0 &&
-                    latitude in -90.0..90.0
-                ) {
+                    val normalizedFound = foundAddress.lowercase(Locale("ru"))
+                        .replace("ё", "е")
+                        .replace(Regex("""[^а-яa-z0-9/ -]"""), " ")
+                        .replace(Regex("""\s+"""), " ")
+                        .trim()
 
-                    val foundAddress = item.optString(
-                        "full_address_name",
-                        address
-                    )
+                    val foundNumberTokens = Regex(
+                        """\b\d{1,5}(?:\s*[/\-]\s*\d{1,5})?\s*[а-яa-z]?\b""",
+                        RegexOption.IGNORE_CASE
+                    ).findAll(normalizedFound)
+                        .map { it.value.replace(Regex("""\s+"""), "").lowercase(Locale("ru")) }
+                        .toSet()
 
-                    return GeocodeResult(
-                        address = foundAddress,
-                        longitude = longitude,
-                        latitude = latitude
-                    )
+                    val houseMatched = houseMatches.any { it in foundNumberTokens }
+                    if (houseMatches.isNotEmpty() && !houseMatched) continue
+
+                    val matchedStreetTokens = streetTokens.count {
+                        normalizedFound.split(Regex("""[^а-яa-z0-9]+""")).contains(it)
+                    }
+
+                    if (streetTokens.isNotEmpty() && matchedStreetTokens == 0) continue
+
+                    var score = matchedStreetTokens * 10
+                    if (houseMatched) score += 100
+                    if (normalizedFound.contains("набережные челны")) score += 2
+                    if (score > bestScore) {
+                        bestScore = score
+                        best = GeocodeResult(
+                            address = foundAddress,
+                            longitude = longitude,
+                            latitude = latitude
+                        )
+                    }
                 }
+            } finally {
+                connection.disconnect()
             }
-
-            return null
-
-        } finally {
-            connection.disconnect()
         }
+
+        return best
     }
 
     // ПОСТРОЕНИЕ МАРШРУТА В 2ГИС
@@ -981,7 +1017,6 @@ class MainActivity : Activity() {
     private fun openRouteIn2Gis() {
 
         val warehouse = warehousePoint
-
         if (warehouse == null) {
             Toast.makeText(
                 this,
@@ -1003,7 +1038,7 @@ class MainActivity : Activity() {
         if (geocodedAddresses.size > 10) {
             Toast.makeText(
                 this,
-                "Слишком много адресов для одной ссылки 2ГИС",
+                "Для одного маршрута можно передать не более 10 адресов доставки",
                 Toast.LENGTH_LONG
             ).show()
             return
@@ -1016,30 +1051,35 @@ class MainActivity : Activity() {
         }
 
         val pointsPath = points.joinToString("|") { point ->
-            "${point.longitude},${point.latitude}"
+            String.format(
+                Locale.US,
+                "%.6f,%.6f",
+                point.longitude,
+                point.latitude
+            )
         }
 
         val routeUrl =
-            "https://2gis.ru/directions/tab/car/points/$pointsPath"
+            "https://2gis.ru/naberezhnye-chelny/directions/tab/car/points/$pointsPath"
 
         try {
+            val routeUri = Uri.parse(routeUrl)
 
-            val intent = Intent(
-                Intent.ACTION_VIEW,
-                Uri.parse(routeUrl)
-            ).apply {
-                addCategory(Intent.CATEGORY_BROWSABLE)
+            val dgIsIntent = Intent(Intent.ACTION_VIEW, routeUri).apply {
+                setPackage("ru.dublgis.dgismobile")
             }
 
-            startActivity(intent)
+            try {
+                startActivity(dgIsIntent)
+            } catch (_: Exception) {
+                startActivity(Intent(Intent.ACTION_VIEW, routeUri))
+            }
 
         } catch (e: Exception) {
-
-            status.text = "Не удалось открыть 2ГИС: ${e.message}"
-
+            status.text = "Не удалось открыть маршрут: ${e.message}"
             Toast.makeText(
                 this,
-                "Не удалось открыть ссылку маршрута",
+                "Не удалось передать маршрут в 2ГИС",
                 Toast.LENGTH_LONG
             ).show()
         }
@@ -1200,6 +1240,7 @@ class MainActivity : Activity() {
 
         photoButton.isEnabled = false
         geocodeButton.isEnabled = false
+        invalidateRouteData()
 
         status.text = "Подготовка фотографии..."
 
@@ -1258,7 +1299,7 @@ class MainActivity : Activity() {
 
                 val recognizedText = recognizeVariants(
                     tess,
-                    listOf(gray, binary)
+                    listOf(original, gray, binary)
                 )
 
                 val foundAddresses = extractAddresses(recognizedText)
