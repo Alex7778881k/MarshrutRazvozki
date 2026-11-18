@@ -6,4 +6,12 @@
         name="camera"
         path="camera/" />
 
+    <files-path
+        name="files"
+        path="." />
+
+    <external-files-path
+        name="external"
+        path="." />
+
 </paths>
