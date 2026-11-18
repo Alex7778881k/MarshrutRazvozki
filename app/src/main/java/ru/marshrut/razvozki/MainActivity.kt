@@ -1,18 +1,18 @@
-
 package ru.marshrut.razvozki
 
 import android.app.Activity
 import android.os.Bundle
 import android.content.Intent
 import android.content.ClipData
-import android.content.ActivityNotFoundException
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Matrix
 import android.net.Uri
+import android.os.Environment
 import android.provider.MediaStore
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
@@ -20,505 +20,570 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
+import androidx.core.content.FileProvider
 import com.googlecode.tesseract.android.TessBaseAPI
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import java.util.Locale
 import java.util.concurrent.Executors
+import kotlin.math.max
 
 class MainActivity : Activity() {
 
-    private lateinit var status: TextView
-    private lateinit var addressesContainer: LinearLayout
-    private lateinit var photoButton: Button
-    private lateinit var routeButton: Button
-    private lateinit var countText: TextView
-    private lateinit var coordinatesText: TextView
+    companion object {
+        private const val CAMERA_REQUEST = 101
+        private const val MAX_ADDRESSES = 10
 
-    private val addresses = mutableListOf<String>()
+        private const val WAREHOUSE_ADDRESS =
+            "Индустриальный проезд, 22/1, Набережные Челны"
 
-    private var geocodedAddresses: List<GeocodeResult> = emptyList()
-    private var warehousePoint: GeocodeResult? = null
+        private const val TESSDATA_URL =
+            "https://github.com/tesseract-ocr/tessdata_best/raw/main/rus.traineddata"
 
-    private var photoUri: Uri? = null
-    private var photoFile: File? = null
+        private val CITIES = listOf(
+            "Набережные Челны",
+            "Нижнекамск",
+            "Казань",
+            "Елабуга",
+            "Менделеевск",
+            "Мамадыш",
+            "Заинск",
+            "Альметьевск",
+            "Ижевск",
+            "Москва"
+        )
+    }
 
     private val executor = Executors.newSingleThreadExecutor()
 
-    private val cameraRequest = 1001
+    private lateinit var rootLayout: LinearLayout
+    private lateinit var addressContainer: LinearLayout
+    private lateinit var warehouseInput: EditText
+    private lateinit var statusText: TextView
+    private lateinit var cameraButton: Button
+    private lateinit var addButton: Button
+    private lateinit var geocodeButton: Button
+    private lateinit var routeButton: Button
 
-    private val warehouseAddress =
-        "423800, Россия, Республика Татарстан, Набережные Челны, Центральный район, Индустриальный проезд, 22/1"
+    private val addressInputs = mutableListOf<EditText>()
+    private val coordinates = mutableListOf<GeoPoint>()
 
-    data class GeocodeResult(
-        val address: String,
-        val longitude: Double,
-        val latitude: Double,
-        val objectId: String = ""
-    )
+    private var warehousePoint: GeoPoint? = null
+    private var photoFile: File? = null
+    private var isBusy = false
 
-    private val cities = listOf(
-        "набережные челны",
-        "нижнекамск",
-        "казань",
-        "елабуга",
-        "менделеевск",
-        "мамадыш",
-        "заинск",
-        "альметьевск",
-        "ижевск",
-        "москва"
+    data class GeoPoint(
+        val lat: Double,
+        val lon: Double,
+        val objectId: String? = null,
+        val address: String = ""
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         createInterface()
     }
 
-    // ИНТЕРФЕЙС
-
     private fun createInterface() {
+        val scroll = ScrollView(this)
 
-        val layout = LinearLayout(this).apply {
+        rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(24, 24, 24, 24)
         }
 
+        scroll.addView(rootLayout)
+
         val title = TextView(this).apply {
-            text = "Маршрут развозки"
-            textSize = 25f
+            text = "МАРШРУТ ДОСТАВКИ"
+            textSize = 23f
             gravity = Gravity.CENTER
+            setPadding(0, 10, 0, 25)
+        }
+        rootLayout.addView(title)
+
+        addLabel("АДРЕС СКЛАДА")
+
+        warehouseInput = EditText(this).apply {
+            setText(WAREHOUSE_ADDRESS)
+            textSize = 16f
+            minLines = 2
+            setPadding(12, 12, 12, 12)
+        }
+        rootLayout.addView(warehouseInput)
+
+        warehouseInput.addTextChangedListener(SimpleTextWatcher {
+            invalidateRoute()
+        })
+
+        cameraButton = createButton("СФОТОГРАФИРОВАТЬ ЛИСТ")
+        rootLayout.addView(cameraButton)
+
+        cameraButton.setOnClickListener {
+            openCamera()
         }
 
-        photoButton = Button(this).apply {
-            text = "СФОТОГРАФИРОВАТЬ ЛИСТ"
-            setOnClickListener {
-                takePhoto()
-            }
-        }
+        addLabel("АДРЕСА ДОСТАВКИ")
 
-        status = TextView(this).apply {
-            text = "Сфотографируйте лист с адресами"
-            textSize = 15f
-            setPadding(0, 12, 0, 12)
-        }
-
-        countText = TextView(this).apply {
-            text = "Найдено адресов: 0"
-            textSize = 19f
-            setPadding(0, 12, 0, 12)
-        }
-
-        addressesContainer = LinearLayout(this).apply {
+        addressContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
+        rootLayout.addView(addressContainer)
 
-        val addressScroll = ScrollView(this).apply {
-            addView(addressesContainer)
-        }
+        addButton = createButton("ДОБАВИТЬ АДРЕС")
+        rootLayout.addView(addButton)
 
-        routeButton = Button(this).apply {
-            text = "ОТКРЫТЬ МАРШРУТ В 2ГИС"
-            isEnabled = false
-
-            setOnClickListener {
-                openRouteIn2Gis()
+        addButton.setOnClickListener {
+            if (addressInputs.size >= MAX_ADDRESSES) {
+                showMessage("Максимум $MAX_ADDRESSES адресов")
+                return@setOnClickListener
             }
+
+            addAddressField("")
+            invalidateRoute()
         }
 
-        coordinatesText = TextView(this).apply {
-            textSize = 14f
-            setPadding(0, 12, 0, 12)
+        geocodeButton = createButton("ОПРЕДЕЛИТЬ КООРДИНАТЫ")
+        rootLayout.addView(geocodeButton)
+
+        geocodeButton.setOnClickListener {
+            geocodeAddresses()
         }
 
-        val resultScroll = ScrollView(this).apply {
-            addView(coordinatesText)
+        routeButton = createButton("ПОСТРОИТЬ МАРШРУТ В 2ГИС")
+        rootLayout.addView(routeButton)
+        routeButton.isEnabled = false
+
+        routeButton.setOnClickListener {
+            openRouteIn2Gis()
         }
 
-        layout.addView(title)
-        layout.addView(photoButton)
-        layout.addView(status)
-        layout.addView(countText)
+        statusText = TextView(this).apply {
+            text = "Готово к работе"
+            textSize = 15f
+            gravity = Gravity.CENTER
+            setPadding(5, 20, 5, 20)
+        }
+        rootLayout.addView(statusText)
 
-        layout.addView(
-            addressScroll,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                0,
-                1f
-            )
-        )
+        setContentView(scroll)
 
-        layout.addView(routeButton)
-
-        layout.addView(
-            resultScroll,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                0,
-                0.7f
-            )
-        )
-
-        setContentView(layout)
+        addAddressField("")
     }
 
-    // ФОТОГРАФИРОВАНИЕ
+    private fun addLabel(text: String) {
+        val label = TextView(this).apply {
+            this.text = text
+            textSize = 14f
+            setPadding(0, 18, 0, 7)
+        }
+        rootLayout.addView(label)
+    }
 
-    private fun takePhoto() {
+    private fun createButton(text: String): Button {
+        return Button(this).apply {
+            this.text = text
+            textSize = 14f
+            isAllCaps = false
+            setPadding(10, 12, 10, 12)
+
+            val params = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            params.setMargins(0, 10, 0, 5)
+            layoutParams = params
+        }
+    }
+
+    private fun addAddressField(value: String) {
+        val index = addressInputs.size
+
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        val edit = EditText(this).apply {
+            setText(value)
+            hint = "Адрес доставки ${index + 1}"
+            textSize = 15f
+            minLines = 1
+            maxLines = 3
+            setPadding(8, 8, 8, 8)
+
+            layoutParams = LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f
+            )
+        }
+
+        val deleteButton = Button(this).apply {
+            text = "✕"
+            textSize = 16f
+            isAllCaps = false
+        }
+
+        edit.addTextChangedListener(SimpleTextWatcher {
+            invalidateRoute()
+        })
+
+        deleteButton.setOnClickListener {
+            saveCurrentAddresses()
+
+            val position = addressInputs.indexOf(edit)
+            if (position >= 0) {
+                addressInputs.removeAt(position)
+                addressContainer.removeViewAt(position)
+            }
+
+            refreshAddressHints()
+            invalidateRoute()
+        }
+
+        row.addView(edit)
+        row.addView(deleteButton)
+
+        addressInputs.add(edit)
+        addressContainer.addView(row)
+
+        refreshAddressHints()
+    }
+
+    private fun refreshAddressHints() {
+        addressInputs.forEachIndexed { index, edit ->
+            edit.hint = "Адрес доставки ${index + 1}"
+        }
+    }
+
+    private fun saveCurrentAddresses() {
+        // Тексты хранятся непосредственно в EditText.
+        // Метод оставлен для сохранения актуального состояния перед удалением.
+        addressInputs.forEach { it.text.toString() }
+    }
+
+    private fun invalidateRoute() {
+        warehousePoint = null
+        coordinates.clear()
+        routeButton.isEnabled = false
+    }
+
+    // ---------------------------------------------------------
+    // КАМЕРА
+    // ---------------------------------------------------------
+
+    private fun openCamera() {
+        if (isBusy) return
 
         try {
+            val cameraDirectory = File(cacheDir, "camera")
 
-            val directory = File(cacheDir, "camera")
-
-            if (!directory.exists() && !directory.mkdirs()) {
-                throw Exception("Не удалось создать папку камеры")
+            if (!cameraDirectory.exists()) {
+                cameraDirectory.mkdirs()
             }
 
             photoFile = File(
-                directory,
-                "photo_${System.currentTimeMillis()}.jpg"
+                cameraDirectory,
+                "delivery_${System.currentTimeMillis()}.jpg"
             )
 
-            if (photoFile!!.exists()) {
-                photoFile!!.delete()
-            }
-
-            photoUri = FileProvider.getUriForFile(
+            val photoUri = FileProvider.getUriForFile(
                 this,
                 "$packageName.fileprovider",
                 photoFile!!
             )
 
-            val uri = photoUri
-                ?: throw Exception("Не удалось создать URI фотографии")
+            val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
+                putExtra(MediaStore.EXTRA_OUTPUT, photoUri)
 
-            val intent = Intent(
-                MediaStore.ACTION_IMAGE_CAPTURE
-            )
+                clipData = ClipData.newUri(
+                    contentResolver,
+                    "Фото листа доставки",
+                    photoUri
+                )
 
-            intent.putExtra(
-                MediaStore.EXTRA_OUTPUT,
-                uri
-            )
+                addFlags(
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            }
 
-            intent.addFlags(
-                Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            )
-
-            intent.clipData = ClipData.newUri(
-                contentResolver,
-                "Фотография листа доставки",
-                uri
-            )
-
-            photoButton.isEnabled = false
-            routeButton.isEnabled = false
-
-            status.text = "Запуск камеры..."
-
-            // ВАЖНО:
-            // Не используем resolveActivity().
-            // Некоторые устройства возвращают null,
-            // даже если приложение камеры установлено.
-
-            startActivityForResult(
-                intent,
-                cameraRequest
-            )
-
-        } catch (e: ActivityNotFoundException) {
-
-            photoButton.isEnabled = true
-
-            status.text = "Приложение камеры не найдено"
-
-            Toast.makeText(
-                this,
-                "На устройстве не найдено приложение камеры",
-                Toast.LENGTH_LONG
-            ).show()
+            cameraButton.isEnabled = false
+            startActivityForResult(intent, CAMERA_REQUEST)
 
         } catch (e: Exception) {
-
-            photoButton.isEnabled = true
-
-            status.text =
-                "Ошибка запуска камеры: ${e.javaClass.simpleName}: ${e.message}"
-
-            Toast.makeText(
-                this,
-                "Ошибка камеры: ${e.message}",
-                Toast.LENGTH_LONG
-            ).show()
+            cameraButton.isEnabled = true
+            showMessage("Не удалось открыть камеру: ${e.message}")
         }
     }
 
-    // ПОЛУЧЕНИЕ РЕЗУЛЬТАТА КАМЕРЫ
-
-    @Deprecated("Используется для совместимости")
+    @Deprecated("Используется совместимость со старыми версиями Android")
     override fun onActivityResult(
         requestCode: Int,
         resultCode: Int,
         data: Intent?
     ) {
+        super.onActivityResult(requestCode, resultCode, data)
 
-        super.onActivityResult(
-            requestCode,
-            resultCode,
-            data
-        )
+        if (requestCode != CAMERA_REQUEST) return
 
-        if (requestCode != cameraRequest) return
+        cameraButton.isEnabled = true
 
-        if (resultCode == Activity.RESULT_OK) {
-
-            val file = photoFile
-
-            if (
-                file != null &&
-                file.exists() &&
-                file.length() > 1000
-            ) {
-
-                status.text = "Фотография получена. Подготовка..."
-
-                recognizePhoto(file)
-
-            } else {
-
-                photoButton.isEnabled = true
-
-                status.text =
-                    "Камера не сохранила фотографию. Попробуйте ещё раз."
-
-                Toast.makeText(
-                    this,
-                    "Файл фотографии отсутствует или пустой",
-                    Toast.LENGTH_LONG
-                ).show()
-            }
-
-        } else {
-
-            photoButton.isEnabled = true
-
-            status.text = "Фотографирование отменено"
-
-        }
-    }
-
-    // ЗАГРУЗКА РУССКОГО ЯЗЫКА TESSERACT
-
-    private fun downloadRussianLanguage(directory: File) {
-
-        val tessdata = File(directory, "tessdata")
-
-        if (!tessdata.exists()) {
-            tessdata.mkdirs()
-        }
-
-        val languageFile = File(
-            tessdata,
-            "rus.traineddata"
-        )
-
-        if (
-            languageFile.exists() &&
-            languageFile.length() > 5000000
-        ) {
+        if (resultCode != RESULT_OK) {
+            showMessage("Фотографирование отменено")
             return
         }
 
-        languageFile.delete()
+        val file = photoFile
 
-        val temporaryFile = File(
-            tessdata,
-            "rus.tmp"
-        )
+        if (file == null || !file.exists() || file.length() < 1000) {
+            showMessage("Фотография не сохранена. Попробуйте ещё раз")
+            return
+        }
 
-        val connection = URL(
-            "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/main/rus.traineddata"
-        ).openConnection() as HttpURLConnection
+        recognizePhoto(file)
+    }
 
-        try {
+    // ---------------------------------------------------------
+    // OCR
+    // ---------------------------------------------------------
 
-            connection.connectTimeout = 30000
-            connection.readTimeout = 120000
-            connection.connect()
+    private fun recognizePhoto(file: File) {
+        if (isBusy) return
 
-            if (
-                connection.responseCode !=
-                HttpURLConnection.HTTP_OK
-            ) {
+        isBusy = true
+        cameraButton.isEnabled = false
+        geocodeButton.isEnabled = false
+        routeButton.isEnabled = false
 
-                throw Exception(
-                    "Ошибка загрузки русского языка: HTTP ${connection.responseCode}"
+        statusText.text = "Обработка фотографии..."
+
+        executor.execute {
+            var bitmap: Bitmap? = null
+            var gray: Bitmap? = null
+            var binary: Bitmap? = null
+
+            try {
+                val tessData = prepareTessdata()
+
+                bitmap = loadCorrectedBitmap(file)
+                    ?: throw Exception("Не удалось прочитать фотографию")
+
+                gray = createGrayBitmap(bitmap)
+                binary = createBinaryBitmap(gray)
+
+                val recognized = recognizeVariants(
+                    listOf(bitmap, gray, binary),
+                    tessData
                 )
-            }
 
-            connection.inputStream.use { input ->
+                val extracted = extractAddresses(recognized)
 
-                FileOutputStream(temporaryFile).use { output ->
+                runOnUiThread {
+                    if (extracted.isEmpty()) {
+                        statusText.text =
+                            "Не удалось найти адреса. Попробуйте другое фото"
+                    } else {
+                        addressContainer.removeAllViews()
+                        addressInputs.clear()
 
-                    input.copyTo(output)
+                        extracted.take(MAX_ADDRESSES).forEach {
+                            addAddressField(it)
+                        }
+
+                        invalidateRoute()
+
+                        statusText.text =
+                            "Распознано адресов: ${extracted.size}. Проверьте адреса"
+                    }
+
+                    cameraButton.isEnabled = true
+                    geocodeButton.isEnabled = true
+                    isBusy = false
                 }
+
+            } catch (e: Exception) {
+                runOnUiThread {
+                    statusText.text = "Ошибка распознавания: ${e.message}"
+                    cameraButton.isEnabled = true
+                    geocodeButton.isEnabled = true
+                    isBusy = false
+                }
+            } finally {
+                bitmap?.recycle()
+                gray?.recycle()
+                binary?.recycle()
             }
-
-            if (temporaryFile.length() < 5000000) {
-
-                throw Exception(
-                    "Русский языковой файл загружен не полностью"
-                )
-            }
-
-            if (!temporaryFile.renameTo(languageFile)) {
-
-                throw Exception(
-                    "Не удалось сохранить языковой файл"
-                )
-            }
-
-        } finally {
-
-            connection.disconnect()
         }
     }
 
-    // ПОДГОТОВКА ФОТОГРАФИИ
+    private fun prepareTessdata(): String {
+        val baseDir = File(filesDir, "tesseract")
+        val tessdataDir = File(baseDir, "tessdata")
+        val trainedFile = File(tessdataDir, "rus.traineddata")
 
-    private fun loadOrientedBitmap(file: File): Bitmap {
+        if (!tessdataDir.exists()) {
+            tessdataDir.mkdirs()
+        }
 
-        val bounds = BitmapFactory.Options().apply {
+        if (!trainedFile.exists() || trainedFile.length() < 1000000) {
+            val connection = URL(TESSDATA_URL)
+                .openConnection() as HttpURLConnection
+
+            try {
+                connection.connectTimeout = 20000
+                connection.readTimeout = 60000
+                connection.requestMethod = "GET"
+
+                if (connection.responseCode != 200) {
+                    throw Exception(
+                        "Не удалось загрузить языковой файл OCR"
+                    )
+                }
+
+                connection.inputStream.use { input ->
+                    FileOutputStream(trainedFile).use { output ->
+                        input.copyTo(output)
+                    }
+                }
+            } finally {
+                connection.disconnect()
+            }
+        }
+
+        return baseDir.absolutePath
+    }
+
+    private fun loadCorrectedBitmap(file: File): Bitmap? {
+        val options = BitmapFactory.Options().apply {
             inJustDecodeBounds = true
         }
 
-        BitmapFactory.decodeFile(
-            file.absolutePath,
-            bounds
-        )
-
-        if (
-            bounds.outWidth <= 0 ||
-            bounds.outHeight <= 0
-        ) {
-
-            throw Exception(
-                "Не удалось прочитать фотографию"
-            )
-        }
+        BitmapFactory.decodeFile(file.absolutePath, options)
 
         var sample = 1
+        val maxDimension = max(options.outWidth, options.outHeight)
 
-        while (
-            bounds.outWidth / sample > 2600 ||
-            bounds.outHeight / sample > 2600
-        ) {
+        while (maxDimension / sample > 2600) {
             sample *= 2
         }
 
-        val options = BitmapFactory.Options().apply {
+        val decodeOptions = BitmapFactory.Options().apply {
             inSampleSize = sample
             inPreferredConfig = Bitmap.Config.ARGB_8888
         }
 
-        var bitmap = BitmapFactory.decodeFile(
+        val original = BitmapFactory.decodeFile(
             file.absolutePath,
-            options
-        ) ?: throw Exception(
-            "Не удалось открыть фотографию"
-        )
+            decodeOptions
+        ) ?: return null
 
-        val exif = ExifInterface(
-            file.absolutePath
-        )
-
-        val orientation = exif.getAttributeInt(
-            ExifInterface.TAG_ORIENTATION,
-            ExifInterface.ORIENTATION_NORMAL
-        )
-
-        val rotation = when (orientation) {
-
-            ExifInterface.ORIENTATION_ROTATE_90 -> 90f
-
-            ExifInterface.ORIENTATION_ROTATE_180 -> 180f
-
-            ExifInterface.ORIENTATION_ROTATE_270 -> 270f
-
-            else -> 0f
-        }
-
-        if (rotation != 0f) {
-
-            val matrix = Matrix()
-
-            matrix.postRotate(rotation)
-
-            val rotated = Bitmap.createBitmap(
-                bitmap,
-                0,
-                0,
-                bitmap.width,
-                bitmap.height,
-                matrix,
-                true
-            )
-
-            bitmap.recycle()
-
-            bitmap = rotated
-        }
-
-        val maxDimension = maxOf(
-            bitmap.width,
-            bitmap.height
-        )
-
-        if (maxDimension < 2600) {
-
-            val scale = minOf(
-                1.35f,
-                2600f / maxDimension
-            )
-
-            val enlarged = Bitmap.createScaledBitmap(
-                bitmap,
-                (bitmap.width * scale).toInt(),
-                (bitmap.height * scale).toInt(),
-                true
-            )
-
-            if (enlarged !== bitmap) {
-                bitmap.recycle()
+        val rotation = try {
+            val exif = ExifInterface(file.absolutePath)
+            when (
+                exif.getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION,
+                    ExifInterface.ORIENTATION_NORMAL
+                )
+            ) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                else -> 0f
             }
-
-            bitmap = enlarged
+        } catch (_: Exception) {
+            0f
         }
 
-        return bitmap
+        if (rotation == 0f) return original
+
+        val matrix = Matrix().apply {
+            postRotate(rotation)
+        }
+
+        val corrected = Bitmap.createBitmap(
+            original,
+            0,
+            0,
+            original.width,
+            original.height,
+            matrix,
+            true
+        )
+
+        if (corrected !== original) {
+            original.recycle()
+        }
+
+        return corrected
     }
 
-    // ОБРАБОТКА ФОТОГРАФИИ
+    private fun createGrayBitmap(source: Bitmap): Bitmap {
+        val result = Bitmap.createBitmap(
+            source.width,
+            source.height,
+            Bitmap.Config.ARGB_8888
+        )
 
-    private fun createProcessedImages(
-        source: Bitmap
-    ): Pair<Bitmap, Bitmap> {
+        val pixels = IntArray(source.width * source.height)
+        source.getPixels(
+            pixels,
+            0,
+            source.width,
+            0,
+            0,
+            source.width,
+            source.height
+        )
 
+        for (i in pixels.indices) {
+            val color = pixels[i]
+
+            val r = Color.red(color)
+            val g = Color.green(color)
+            val b = Color.blue(color)
+
+            var grayValue = (
+                0.299 * r +
+                    0.587 * g +
+                    0.114 * b
+                ).toInt()
+
+            grayValue = ((grayValue - 128) * 1.35 + 128)
+                .toInt()
+                .coerceIn(0, 255)
+
+            pixels[i] = Color.rgb(
+                grayValue,
+                grayValue,
+                grayValue
+            )
+        }
+
+        result.setPixels(
+            pixels,
+            0,
+            source.width,
+            0,
+            0,
+            source.width,
+            source.height
+        )
+
+        return result
+    }
+
+    private fun createBinaryBitmap(source: Bitmap): Bitmap {
         val width = source.width
         val height = source.height
 
-        val pixels = IntArray(
-            width * height
-        )
+        val pixels = IntArray(width * height)
 
         source.getPixels(
             pixels,
@@ -532,1705 +597,605 @@ class MainActivity : Activity() {
 
         val histogram = IntArray(256)
 
-        for (i in pixels.indices) {
-
-            val color = pixels[i]
-
-            val red = Color.red(color)
-            val green = Color.green(color)
-            val blue = Color.blue(color)
-
-            var gray = (
-                0.299 * red +
-                    0.587 * green +
-                    0.114 * blue
-                ).toInt()
-
-            gray = (
-                (gray - 128) * 1.35 + 128
-                ).toInt().coerceIn(0, 255)
-
-            pixels[i] = Color.rgb(
-                gray,
-                gray,
-                gray
-            )
-
-            histogram[gray]++
+        for (color in pixels) {
+            histogram[Color.red(color)]++
         }
 
         val total = pixels.size
-
         var sum = 0L
 
         for (i in 0..255) {
-
             sum += i.toLong() * histogram[i]
         }
 
         var sumBackground = 0L
         var weightBackground = 0
-        var maximumVariance = 0.0
-        var threshold = 128
+        var bestVariance = -1.0
+        var threshold = 150
 
         for (i in 0..255) {
-
             weightBackground += histogram[i]
 
             if (weightBackground == 0) continue
 
-            val weightForeground =
-                total - weightBackground
-
+            val weightForeground = total - weightBackground
             if (weightForeground == 0) break
 
             sumBackground += i.toLong() * histogram[i]
 
             val meanBackground =
-                sumBackground.toDouble() /
-                    weightBackground
+                sumBackground.toDouble() / weightBackground
 
             val meanForeground =
-                (sum - sumBackground).toDouble() /
-                    weightForeground
+                (sum - sumBackground).toDouble() / weightForeground
 
             val variance =
                 weightBackground.toDouble() *
-                    weightForeground.toDouble() *
+                    weightForeground *
                     (meanBackground - meanForeground) *
                     (meanBackground - meanForeground)
 
-            if (variance > maximumVariance) {
-
-                maximumVariance = variance
+            if (variance > bestVariance) {
+                bestVariance = variance
                 threshold = i
             }
         }
 
-        val grayBitmap = Bitmap.createBitmap(
-            width,
-            height,
-            Bitmap.Config.ARGB_8888
-        )
-
-        grayBitmap.setPixels(
-            pixels,
-            0,
-            width,
-            0,
-            0,
-            width,
-            height
-        )
-
         for (i in pixels.indices) {
-
-            val gray = Color.red(pixels[i])
-
-            pixels[i] = if (gray >= threshold) {
+            val value = Color.red(pixels[i])
+            pixels[i] = if (value > threshold) {
                 Color.WHITE
             } else {
                 Color.BLACK
             }
         }
 
-        val binaryBitmap = Bitmap.createBitmap(
+        return Bitmap.createBitmap(
             width,
             height,
             Bitmap.Config.ARGB_8888
-        )
-
-        binaryBitmap.setPixels(
-            pixels,
-            0,
-            width,
-            0,
-            0,
-            width,
-            height
-        )
-
-        return Pair(
-            grayBitmap,
-            binaryBitmap
-        )
+        ).also {
+            it.setPixels(pixels, 0, width, 0, 0, width, height)
+        }
     }
-
-    // РАСПОЗНАВАНИЕ РАЗНЫХ ВАРИАНТОВ ФОТО
 
     private fun recognizeVariants(
-        tess: TessBaseAPI,
-        images: List<Bitmap>
+        variants: List<Bitmap>,
+        dataPath: String
     ): String {
+        val tess = TessBaseAPI()
 
-        val modes = intArrayOf(
+        try {
+            if (!tess.init(dataPath, "rus")) {
+                throw Exception("Не удалось запустить Tesseract")
+            }
 
-            TessBaseAPI.PageSegMode.PSM_AUTO,
+            tess.setVariable("preserve_interword_spaces", "1")
 
-            TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK,
+            var bestText = ""
+            var bestScore = -1
 
-            TessBaseAPI.PageSegMode.PSM_SINGLE_COLUMN
-        )
+            val modes = listOf(3, 6, 4)
 
-        var bestText = ""
-        var bestScore = Int.MIN_VALUE
+            for (bitmap in variants) {
+                for (mode in modes) {
+                    tess.setPageSegMode(mode)
+                    tess.setImage(bitmap)
 
-        for (image in images) {
+                    val text = tess.utF8Text ?: ""
+                    val confidence = tess.meanConfidence()
 
-            for (mode in modes) {
+                    val score =
+                        text.length +
+                            confidence * 3 +
+                            text.count { it.isDigit() } * 2
 
-                tess.setPageSegMode(mode)
-
-                tess.setImage(image)
-
-                val text = (
-                    tess.getUTF8Text() ?: ""
-                    ).trim()
-
-                if (text.isBlank()) continue
-
-                val confidence = tess.meanConfidence()
-
-                val addressCount =
-                    extractAddresses(text).size
-
-                val usefulLines = text.lines().count {
-
-                    line -> line.any {
-                        it.isLetterOrDigit()
+                    if (score > bestScore) {
+                        bestScore = score
+                        bestText = text
                     }
                 }
-
-                val score =
-                    addressCount * 1000 +
-                        confidence * 2 +
-                        usefulLines.coerceAtMost(100)
-
-                if (
-                    score > bestScore ||
-                    (
-                        score == bestScore &&
-                            text.length > bestText.length
-                        )
-                ) {
-
-                    bestScore = score
-                    bestText = text
-                }
             }
-        }
 
-        return bestText
+            return bestText
+
+        } finally {
+            tess.end()
+        }
     }
 
-    // ВЫДЕЛЕНИЕ АДРЕСОВ ИЗ ТЕКСТА
+    private fun extractAddresses(text: String): List<String> {
+        val normalized = text
+            .replace('\u00A0', ' ')
+            .replace('|', ' ')
+            .replace('—', '-')
+            .replace('–', '-')
+            .replace(Regex("[ \\t]+"), " ")
 
-    private fun extractAddresses(
-        text: String
-    ): List<String> {
-
-        val lines = text
-            .replace('\r', '\n')
-            .split('\n')
+        val lines = normalized
+            .lines()
             .map {
-
-                it.replace(
-                    Regex("""^[\s\-•*]+"""),
-                    ""
-                ).trim()
-            }
-            .filter {
-                it.isNotBlank()
-            }
-
-        val streetWords = listOf(
-
-            "ул", "улица",
-
-            "пр", "проспект",
-
-            "пер", "переулок",
-
-            "ш", "шоссе",
-
-            "б-р", "бульвар",
-
-            "пл", "площадь",
-
-            "проезд", "пр-д",
-
-            "наб", "набережная",
-
-            "мкр", "микрорайон",
-
-            "тер", "территория",
-
-            "тракт"
-        )
-
-        val addressWords = streetWords + listOf(
-
-            "д", "дом",
-
-            "корп", "корпус",
-
-            "стр", "строение",
-
-            "кв", "квартира"
-        )
-
-        val numberPattern = Regex(
-            """\d{1,5}\s*([а-яa-z]|\d+)?""",
-            RegexOption.IGNORE_CASE
-        )
-
-        fun normalized(line: String): String {
-
-            return line
-                .lowercase(Locale("ru"))
-                .replace("ё", "е")
-                .replace(Regex("""[.,;:]"""), " ")
-                .replace(Regex("""\s+"""), " ")
-                .trim()
-        }
-
-        fun hasWord(
-            line: String,
-            words: List<String>
-        ): Boolean {
-
-            val value = normalized(line)
-
-            return words.any { word ->
-
-                Regex(
-                    """(?<![а-яa-z])${Regex.escape(word)}\.?(?![а-яa-z])""",
-                    RegexOption.IGNORE_CASE
-                ).containsMatchIn(value)
-            }
-        }
-
-        fun hasNumber(line: String): Boolean {
-
-            return numberPattern.containsMatchIn(line)
-        }
-
-        fun hasCity(line: String): Boolean {
-
-            val value = normalized(line)
-
-            return cities.any {
-                value.contains(it)
-            }
-        }
-
-        fun isAddress(line: String): Boolean {
-
-            val street = hasWord(
-                line,
-                addressWords
-            )
-
-            val number = hasNumber(line)
-
-            val city = hasCity(line)
-
-            return (
-                street && number ||
-                    city && number
-                ) && line.length >= 5
-        }
-
-        val combinedLines = mutableListOf<String>()
-
-        var pending = ""
-
-        for (line in lines) {
-
-            if (pending.isEmpty()) {
-
-                pending = line
-                continue
-            }
-
-            val pendingHasStreet =
-                hasWord(pending, streetWords)
-
-            val pendingHasNumber =
-                hasNumber(pending)
-
-            val pendingHasCity =
-                hasCity(pending)
-
-            val currentHasStreet =
-                hasWord(line, streetWords)
-
-            val currentHasNumber =
-                hasNumber(line)
-
-            val pendingComplete =
-                pendingHasStreet && pendingHasNumber ||
-                    pendingHasCity && pendingHasNumber
-
-            if (pendingComplete) {
-
-                combinedLines.add(pending)
-
-                pending = line
-                continue
-            }
-
-            if (
-                pendingHasStreet &&
-                currentHasStreet
-            ) {
-
-                combinedLines.add(pending)
-
-                pending = line
-                continue
-            }
-
-            val canJoin =
-                pendingHasCity && currentHasStreet ||
-                    pendingHasStreet && currentHasNumber ||
-                    pendingHasCity && currentHasNumber ||
-                    hasWord(pending, addressWords) &&
-                    currentHasNumber
-
-            if (
-                canJoin &&
-                pending.length + line.length < 180
-            ) {
-
-                pending = "$pending, $line"
-
-            } else {
-
-                combinedLines.add(pending)
-
-                pending = line
-            }
-        }
-
-        if (pending.isNotEmpty()) {
-
-            combinedLines.add(pending)
-        }
-
-        val found = mutableListOf<String>()
-
-        for (line in combinedLines) {
-
-            if (isAddress(line)) {
-
-                val cleaned = line
-                    .replace(
-                        Regex("""^[\s\-•*]+"""),
-                        ""
-                    )
-                    .replace(
-                        Regex("""\s+"""),
-                        " "
-                    )
+                it.trim()
+                    .replace(Regex("^[^А-Яа-яA-Za-z0-9]+"), "")
+                    .replace(Regex("[^А-Яа-яA-Za-z0-9.,/ №-]"), " ")
+                    .replace(Regex("\\s+"), " ")
                     .trim()
-                    .trim(',', ';')
+            }
+            .filter { it.length >= 5 }
 
-                if (
-                    cleaned.isNotBlank() &&
-                    cleaned.length >= 5 &&
-                    cleaned.length <= 180
-                ) {
+        val candidates = mutableListOf<String>()
 
-                    found.add(cleaned)
-                }
+        for (i in lines.indices) {
+            val current = lines[i]
+
+            candidates.add(current)
+
+            if (i + 1 < lines.size) {
+                candidates.add("$current ${lines[i + 1]}")
             }
         }
 
-        return found.distinctBy {
+        val result = linkedSetOf<String>()
 
-            normalized(it).replace(
-                Regex("""[\s.,]+"""),
-                ""
-            )
-        }
-    }
+        for (candidate in candidates) {
+            val value = cleanAddress(candidate)
 
-    // СБРОС КООРДИНАТ
+            val hasNumber = Regex(
+                """(?:д\.?\s*)?\d{1,4}(?:[/\-]\d{1,4})?[а-яА-Яa-zA-Z]?"""
+            ).containsMatchIn(value)
 
-    private fun invalidateRouteData() {
+            val hasStreet = Regex(
+                """(ул\.?|улица|проспект|пр-т|пр\.?|проезд|пер\.?|переулок|бульвар|шоссе|набережная|микрорайон|мкр\.?|дом|д\.)"""
+            ).containsMatchIn(value)
 
-        geocodedAddresses = emptyList()
-
-        warehousePoint = null
-
-        if (::routeButton.isInitialized) {
-
-            routeButton.isEnabled = false
-        }
-
-        if (::coordinatesText.isInitialized) {
-
-            coordinatesText.text = ""
-        }
-    }
-
-    // ОТОБРАЖЕНИЕ АДРЕСОВ
-
-    private fun showAddresses(
-        found: List<String>
-    ) {
-
-        addresses.clear()
-
-        addresses.addAll(found)
-
-        invalidateRouteData()
-
-        addressesContainer.removeAllViews()
-
-        coordinatesText.text = ""
-
-        countText.text =
-            "Найдено адресов: ${addresses.size}"
-
-        if (addresses.isEmpty()) {
-
-            val empty = TextView(this).apply {
-
-                text =
-                    "Адреса не найдены. Попробуйте сфотографировать лист ещё раз."
-
-                textSize = 16f
-
-                setPadding(0, 16, 0, 16)
+            val hasCity = CITIES.any {
+                value.contains(it, ignoreCase = true)
             }
 
-            addressesContainer.addView(empty)
+            if (hasNumber && (hasStreet || hasCity) && value.length >= 8) {
+                result.add(value)
+            }
+        }
 
+        return result.take(MAX_ADDRESSES)
+    }
+
+    private fun cleanAddress(source: String): String {
+        var value = source
+            .replace(Regex("""\b[Оо]бл\.?\b"""), "")
+            .replace(Regex("""\b[Рр]оссия\b"""), "")
+            .replace(Regex("""\b[Рр]еспублика Татарстан\b"""), "")
+            .replace(Regex("""\b[Цц]ентральный район\b"""), "")
+            .replace(Regex("""\s+"""), " ")
+            .trim(' ', ',', '.', '-', ':', ';')
+
+        value = value.replace(
+            Regex("""(\d)\s*[,;]\s*(\d)"""),
+            "$1/$2"
+        )
+
+        return value
+    }
+
+    // ---------------------------------------------------------
+    // ГЕОКОДИРОВАНИЕ 2ГИС
+    // ---------------------------------------------------------
+
+    private fun geocodeAddresses() {
+        if (isBusy) return
+
+        val warehouse = warehouseInput.text.toString().trim()
+
+        val addresses = addressInputs
+            .map { it.text.toString().trim() }
+            .filter { it.isNotBlank() }
+
+        if (warehouse.isBlank()) {
+            showMessage("Укажите адрес склада")
             return
         }
 
-        addresses.forEachIndexed { index, address ->
+        if (addresses.isEmpty()) {
+            showMessage("Добавьте хотя бы один адрес доставки")
+            return
+        }
 
-            val row = LinearLayout(this).apply {
+        if (addresses.size > MAX_ADDRESSES) {
+            showMessage("Максимум $MAX_ADDRESSES адресов")
+            return
+        }
 
-                orientation = LinearLayout.HORIZONTAL
+        val apiKey = BuildConfig.DGIS_API_KEY
 
-                gravity = Gravity.CENTER_VERTICAL
+        if (apiKey.isBlank()) {
+            showMessage("Не задан ключ API 2ГИС")
+            return
+        }
 
-                setPadding(0, 6, 0, 6)
-            }
+        isBusy = true
+        routeButton.isEnabled = false
+        geocodeButton.isEnabled = false
+        cameraButton.isEnabled = false
 
-            val number = TextView(this).apply {
+        statusText.text = "Определение координат..."
 
-                text = "${index + 1}."
+        executor.execute {
+            var foundWarehouse: GeoPoint? = null
+            val foundAddresses = mutableListOf<GeoPoint>()
+            var errorMessage: String? = null
 
-                textSize = 16f
-
-                setPadding(4, 0, 10, 0)
-            }
-
-            val edit = EditText(this).apply {
-
-                setText(address)
-
-                textSize = 15f
-
-                minLines = 1
-
-                maxLines = 3
-
-                isSingleLine = false
-            }
-
-            val delete = Button(this).apply {
-
-                text = "X"
-
-                setOnClickListener {
-
-                    saveEditedAddresses(
-                        startSearch = false
-                    )
-
-                    if (index < addresses.size) {
-
-                        addresses.removeAt(index)
-                    }
-
-                    renderAddresses()
-
-                    if (addresses.isNotEmpty()) {
-
-                        geocodeAddresses()
-                    }
-                }
-            }
-
-            row.addView(number)
-
-            row.addView(
-                edit,
-                LinearLayout.LayoutParams(
-                    0,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    1f
+            try {
+                foundWarehouse = geocodeAddress(
+                    warehouse,
+                    apiKey
+                ) ?: throw Exception(
+                    "Не удалось определить координаты склада: $warehouse"
                 )
+
+                for ((index, address) in addresses.withIndex()) {
+                    runOnUiThread {
+                        statusText.text =
+                            "Определение адреса ${index + 1} из ${addresses.size}..."
+                    }
+
+                    val point = geocodeAddress(address, apiKey)
+
+                    if (point == null) {
+                        throw Exception(
+                            "Не найден адрес ${index + 1}: $address"
+                        )
+                    }
+
+                    foundAddresses.add(point)
+                }
+
+            } catch (e: Exception) {
+                errorMessage = e.message ?: "Ошибка геокодирования"
+            }
+
+            val warehouseResult = foundWarehouse
+            val successful = errorMessage == null &&
+                warehouseResult != null &&
+                foundAddresses.size == addresses.size
+
+            runOnUiThread {
+                if (successful) {
+                    warehousePoint = warehouseResult
+                    coordinates.clear()
+                    coordinates.addAll(foundAddresses)
+
+                    routeButton.isEnabled = true
+
+                    statusText.text =
+                        "Координаты определены. Адресов: ${coordinates.size}"
+                } else {
+                    warehousePoint = null
+                    coordinates.clear()
+                    routeButton.isEnabled = false
+
+                    statusText.text = errorMessage ?: "Не удалось определить координаты"
+                }
+
+                isBusy = false
+                geocodeButton.isEnabled = true
+                cameraButton.isEnabled = true
+            }
+        }
+    }
+
+    private fun geocodeAddress(
+        originalAddress: String,
+        apiKey: String
+    ): GeoPoint? {
+        val query = prepareGeocodeQuery(originalAddress)
+
+        val encodedQuery = URLEncoder.encode(query, "UTF-8")
+        val encodedKey = URLEncoder.encode(apiKey, "UTF-8")
+
+        val requestUrl =
+            "https://catalog.api.2gis.com/3.0/items/geocode" +
+                "?q=$encodedQuery" +
+                "&fields=items.point,items.geometry.centroid" +
+                "&page_size=10" +
+                "&key=$encodedKey"
+
+        val connection = URL(requestUrl)
+            .openConnection() as HttpURLConnection
+
+        try {
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 15000
+            connection.readTimeout = 20000
+            connection.setRequestProperty(
+                "Accept",
+                "application/json"
             )
 
-            row.addView(delete)
+            val responseCode = connection.responseCode
 
-            addressesContainer.addView(row)
-
-            edit.setOnFocusChangeListener {
-
-                _, hasFocus ->
-
-                if (
-                    !hasFocus &&
-                    index < addresses.size
-                ) {
-
-                    val updatedAddress =
-                        edit.text.toString().trim()
-
-                    if (
-                        addresses[index] != updatedAddress
-                    ) {
-
-                        addresses[index] = updatedAddress
-
-                        invalidateRouteData()
-                    }
+            val response = if (responseCode in 200..299) {
+                connection.inputStream.bufferedReader().use {
+                    it.readText()
                 }
+            } else {
+                connection.errorStream?.bufferedReader()?.use {
+                    it.readText()
+                } ?: ""
             }
-        }
 
-        val saveButton = Button(this).apply {
+            if (responseCode !in 200..299) {
+                return null
+            }
 
-            text = "СОХРАНИТЬ ИЗМЕНЕНИЯ"
+            val json = JSONObject(response)
 
-            setOnClickListener {
+            val meta = json.optJSONObject("meta")
+            val metaCode = meta?.optInt("code", 200) ?: 200
 
-                saveEditedAddresses(
-                    startSearch = true
+            if (metaCode !in 200..299) {
+                return null
+            }
+
+            val items = json.optJSONArray("result")
+                ?: json.optJSONObject("result")
+                    ?.optJSONArray("items")
+                ?: json.optJSONArray("items")
+                ?: return null
+
+            var bestPoint: GeoPoint? = null
+            var bestScore = Int.MIN_VALUE
+
+            for (i in 0 until items.length()) {
+                val item = items.optJSONObject(i) ?: continue
+
+                val point = readCoordinates(item) ?: continue
+
+                val fullName = listOf(
+                    item.optString("full_name", ""),
+                    item.optString("full_address_name", ""),
+                    item.optString("address_name", ""),
+                    item.optString("name", "")
+                ).filter { it.isNotBlank() }.joinToString(" ")
+
+                val score = calculateAddressScore(
+                    originalAddress,
+                    fullName
                 )
-            }
-        }
 
-        addressesContainer.addView(saveButton)
-    }
+                if (score > bestScore) {
+                    bestScore = score
 
-    // СОХРАНЕНИЕ ИЗМЕНЕНИЙ
-
-    private fun saveEditedAddresses(
-        startSearch: Boolean = true
-    ) {
-
-        for (i in addresses.indices) {
-
-            val row = addressesContainer.getChildAt(i)
-
-            if (
-                row is LinearLayout &&
-                row.childCount >= 2
-            ) {
-
-                val edit = row.getChildAt(1)
-
-                if (edit is EditText) {
-
-                    addresses[i] =
-                        edit.text.toString().trim()
+                    bestPoint = GeoPoint(
+                        lat = point.first,
+                        lon = point.second,
+                        objectId = item.optString("id")
+                            .takeIf { it.isNotBlank() && it != "null" },
+                        address = fullName
+                    )
                 }
             }
-        }
 
-        addresses.removeAll {
-            it.isBlank()
-        }
+            return bestPoint
 
-        renderAddresses()
-
-        Toast.makeText(
-            this,
-            "Изменения сохранены",
-            Toast.LENGTH_SHORT
-        ).show()
-
-        if (
-            startSearch &&
-            addresses.isNotEmpty()
-        ) {
-
-            geocodeAddresses()
+        } finally {
+            connection.disconnect()
         }
     }
 
-    private fun renderAddresses() {
+    private fun prepareGeocodeQuery(address: String): String {
+        var value = cleanAddress(address)
 
-        showAddresses(
-            addresses.toList()
-        )
-    }
+        value = value
+            .replace(Regex("""^\d{6}\s*[, ]*"""), "")
+            .replace(Regex("""\bРоссия\b""", RegexOption.IGNORE_CASE), "")
+            .replace(
+                Regex("""\bРеспублика Татарстан\b""", RegexOption.IGNORE_CASE),
+                ""
+            )
+            .trim(' ', ',', '.')
 
-    // НОРМАЛИЗАЦИЯ АДРЕСА
+        val hasCity = CITIES.any {
+            value.contains(it, ignoreCase = true)
+        }
 
-    private fun normalizeAddress(
-        value: String
-    ): String {
+        if (!hasCity) {
+            value += ", Набережные Челны"
+        }
 
         return value
-            .lowercase(Locale("ru"))
-            .replace("ё", "е")
-            .replace(Regex("""[.,;:]"""), " ")
-            .replace(Regex("""\s+"""), " ")
-            .trim()
     }
-
-    // ОПРЕДЕЛЕНИЕ ГОРОДА
-
-    private fun detectCity(
-        address: String
-    ): String? {
-
-        val value = normalizeAddress(address)
-
-        return cities.firstOrNull {
-            value.contains(it)
-        }
-    }
-
-    // ВЫДЕЛЕНИЕ НОМЕРА ДОМА
-
-    private fun extractHouseNumbers(
-        address: String
-    ): Set<String> {
-
-        val pattern = Regex(
-            """(?i)(?:\bд\.?\s*)?(\d{1,5}\s*(?:[/\-]\s*\d{1,5})?\s*[а-яa-z]?)"""
-        )
-
-        return pattern.findAll(address)
-            .mapNotNull { match ->
-
-                match.groupValues[1]
-                    .lowercase(Locale("ru"))
-                    .replace(
-                        Regex("""\s+"""),
-                        ""
-                    )
-                    .replace("-", "/")
-                    .takeIf {
-                        it.isNotBlank()
-                    }
-            }
-            .toSet()
-    }
-
-    // ПОЛУЧЕНИЕ КООРДИНАТ ИЗ ОТВЕТА 2ГИС
 
     private fun readCoordinates(
         item: JSONObject
     ): Pair<Double, Double>? {
+        val point = item.optJSONObject("point")
 
-        fun readPoint(
-            obj: JSONObject?
-        ): Pair<Double, Double>? {
+        if (point != null) {
+            val lat = point.optDouble("lat", Double.NaN)
+            val lon = point.optDouble("lon", Double.NaN)
 
-            if (obj == null) return null
-
-            val longitude = obj.optDouble(
-                "lon",
-                Double.NaN
-            )
-
-            val latitude = obj.optDouble(
-                "lat",
-                Double.NaN
-            )
-
-            if (
-                longitude.isFinite() &&
-                latitude.isFinite() &&
-                longitude in -180.0..180.0 &&
-                latitude in -90.0..90.0
-            ) {
-
-                return Pair(
-                    longitude,
-                    latitude
-                )
+            if (lat.isFinite() && lon.isFinite()) {
+                return Pair(lat, lon)
             }
-
-            return null
         }
-
-        // Основной вариант API 2ГИС
-
-        readPoint(
-            item.optJSONObject("point")
-        )?.let {
-            return it
-        }
-
-        // Альтернативный вариант
 
         val geometry = item.optJSONObject("geometry")
 
-        readPoint(
-            geometry?.optJSONObject("centroid")
-        )?.let {
-            return it
-        }
+        if (geometry != null) {
+            val centroid = geometry.opt("centroid")
 
-        readPoint(
-            item.optJSONObject("centroid")
-        )?.let {
-            return it
-        }
+            if (centroid is JSONObject) {
+                val lat = centroid.optDouble("lat", Double.NaN)
+                val lon = centroid.optDouble("lon", Double.NaN)
 
-        // Иногда координаты приходят массивом
-
-        fun readArray(
-            array: JSONArray?
-        ): Pair<Double, Double>? {
-
-            if (array == null || array.length() < 2) {
-                return null
+                if (lat.isFinite() && lon.isFinite()) {
+                    return Pair(lat, lon)
+                }
             }
 
-            val longitude = array.optDouble(
-                0,
-                Double.NaN
-            )
+            if (centroid is String) {
+                val match = Regex(
+                    """POINT\s*\(\s*(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s*\)""",
+                    RegexOption.IGNORE_CASE
+                ).find(centroid)
 
-            val latitude = array.optDouble(
-                1,
-                Double.NaN
-            )
+                if (match != null) {
+                    val lon = match.groupValues[1].toDoubleOrNull()
+                    val lat = match.groupValues[2].toDoubleOrNull()
 
-            if (
-                longitude.isFinite() &&
-                latitude.isFinite() &&
-                longitude in -180.0..180.0 &&
-                latitude in -90.0..90.0
-            ) {
-
-                return Pair(
-                    longitude,
-                    latitude
-                )
+                    if (lat != null && lon != null) {
+                        return Pair(lat, lon)
+                    }
+                }
             }
-
-            return null
-        }
-
-        readArray(
-            geometry?.optJSONArray("centroid")
-        )?.let {
-            return it
-        }
-
-        readArray(
-            geometry?.optJSONArray("coordinates")
-        )?.let {
-            return it
         }
 
         return null
     }
 
-    // ГЕОКОДИРОВАНИЕ ЧЕРЕЗ API 2ГИС 3.0
+    private fun calculateAddressScore(
+        requested: String,
+        returned: String
+    ): Int {
+        val request = requested.lowercase(Locale.ROOT)
+        val result = returned.lowercase(Locale.ROOT)
 
-    private fun geocodeAddress(
-        address: String
-    ): GeocodeResult? {
+        var score = 0
 
-        val apiKey = BuildConfig.DGIS_API_KEY
+        val requestTokens = request
+            .split(Regex("""[\s,./№-]+"""))
+            .filter { it.length >= 3 }
 
-        if (apiKey.isBlank()) {
-
-            throw Exception(
-                "Не найден ключ DGIS_API_KEY"
-            )
-        }
-
-        val cleanedAddress = address
-            .replace(
-                Regex("""\b\d{6}\b"""),
-                " "
-            )
-            .replace(
-                Regex("""(?i)\bроссия\b"""),
-                " "
-            )
-            .replace(
-                Regex("""(?i)\bреспублика\b"""),
-                " "
-            )
-            .replace(
-                Regex("""(?i)\bтатарстан\b"""),
-                " "
-            )
-            .replace(
-                Regex("""(?i)\bцентральный район\b"""),
-                " "
-            )
-            .replace(
-                Regex("""\s+"""),
-                " "
-            )
-            .trim()
-            .trim(',', ';')
-
-        if (cleanedAddress.isBlank()) {
-
-            throw Exception("Пустой адрес")
-        }
-
-        val requestedCity =
-            detectCity(cleanedAddress)
-
-        val houseNumbers =
-            extractHouseNumbers(cleanedAddress)
-
-        val excludedWords = setOf(
-
-            "улица", "ул",
-
-            "проезд", "пр",
-
-            "проспект",
-
-            "переулок", "пер",
-
-            "шоссе", "ш",
-
-            "бульвар", "б-р",
-
-            "набережная", "наб",
-
-            "площадь", "пл",
-
-            "микрорайон", "мкр",
-
-            "дом", "д",
-
-            "корпус", "корп",
-
-            "строение", "стр",
-
-            "квартира", "кв",
-
-            "россия",
-
-            "республика",
-
-            "татарстан",
-
-            "набережные",
-
-            "челны",
-
-            "нижнекамск",
-
-            "казань",
-
-            "елабуга",
-
-            "менделеевск",
-
-            "мамадыш",
-
-            "заинск",
-
-            "альметьевск",
-
-            "ижевск",
-
-            "москва",
-
-            "центральный",
-
-            "район",
-
-            "индекс"
-        )
-
-        val streetTokens = normalizeAddress(
-            cleanedAddress
-        )
-            .split(
-                Regex("""[^а-яa-z]+""")
-            )
-            .filter {
-
-                it.length >= 3 &&
-                    it !in excludedWords
+        for (token in requestTokens) {
+            if (result.contains(token)) {
+                score += 3
             }
-            .distinct()
-
-        if (streetTokens.isEmpty()) {
-
-            throw Exception(
-                "Не удалось определить улицу: $address"
-            )
         }
 
-        val searchCities = if (requestedCity != null) {
+        val houseNumber = Regex(
+            """(?:д\.?\s*)?(\d{1,4}(?:[/\-]\d{1,4})?[а-яa-z]?)""",
+            RegexOption.IGNORE_CASE
+        ).find(request)?.groupValues?.get(1)
 
-            listOf(requestedCity)
-
-        } else {
-
-            cities
-        }
-
-        data class Candidate(
-            val result: GeocodeResult,
-            val score: Int,
-            val city: String
-        )
-
-        val candidates = mutableListOf<Candidate>()
-
-        for (searchCity in searchCities) {
-
-            // Не дублируем город, если он уже есть в адресе.
-
-            val searchText = if (requestedCity != null) {
-
-                cleanedAddress
-
+        if (houseNumber != null) {
+            if (result.contains(houseNumber)) {
+                score += 15
             } else {
-
-                "$cleanedAddress, $searchCity"
-            }
-
-            val requestUrl = Uri.parse(
-                "https://catalog.api.2gis.com/3.0/items/geocode"
-            ).buildUpon()
-
-                .appendQueryParameter(
-                    "q",
-                    searchText
-                )
-
-                .appendQueryParameter(
-                    "key",
-                    apiKey
-                )
-
-                .appendQueryParameter(
-                    "locale",
-                    "ru_RU"
-                )
-
-                .appendQueryParameter(
-                    "page_size",
-                    "10"
-                )
-
-                .build()
-
-            val connection = URL(
-                requestUrl.toString()
-            ).openConnection() as HttpURLConnection
-
-            try {
-
-                connection.requestMethod = "GET"
-
-                connection.connectTimeout = 20000
-
-                connection.readTimeout = 30000
-
-                connection.setRequestProperty(
-                    "Accept",
-                    "application/json"
-                )
-
-                connection.connect()
-
-                val responseCode =
-                    connection.responseCode
-
-                val responseText = if (
-                    responseCode in 200..299
-                ) {
-
-                    connection.inputStream
-                        .bufferedReader()
-                        .use {
-                            it.readText()
-                        }
-
-                } else {
-
-                    val error = connection.errorStream
-                        ?.bufferedReader()
-                        ?.use {
-                            it.readText()
-                        } ?: ""
-
-                    throw Exception(
-                        "2ГИС HTTP $responseCode: ${error.take(500)}"
-                    )
-                }
-
-                val json = JSONObject(responseText)
-
-                val meta = json.optJSONObject("meta")
-
-                val apiCode = meta?.optInt(
-                    "code",
-                    200
-                ) ?: 200
-
-                if (apiCode != 200) {
-
-                    val message = meta
-                        ?.optJSONObject("error")
-                        ?.optString(
-                            "message",
-                            "Неизвестная ошибка"
-                        )
-                        ?: "Неизвестная ошибка"
-
-                    throw Exception(
-                        "Ошибка API 2ГИС: $message (код $apiCode)"
-                    )
-                }
-
-                val items = json
-                    .optJSONObject("result")
-                    ?.optJSONArray("items")
-                    ?: continue
-
-                for (i in 0 until items.length()) {
-
-                    val item = items.optJSONObject(i)
-                        ?: continue
-
-                    val coordinates = readCoordinates(item)
-                        ?: continue
-
-                    val longitude = coordinates.first
-                    val latitude = coordinates.second
-
-                    val foundAddress = item.optString(
-                        "full_name",
-                        ""
-                    )
-                        .ifBlank {
-                            item.optString(
-                                "full_address_name",
-                                ""
-                            )
-                        }
-                        .ifBlank {
-                            item.optString(
-                                "address_name",
-                                ""
-                            )
-                        }
-                        .ifBlank {
-                            item.optString(
-                                "name",
-                                ""
-                            )
-                        }
-                        .trim()
-
-                    if (foundAddress.isBlank()) continue
-
-                    val normalizedFound =
-                        normalizeAddress(foundAddress)
-
-                    val foundCity =
-                        detectCity(normalizedFound)
-
-                    if (
-                        foundCity != null &&
-                        foundCity != searchCity
-                    ) {
-                        continue
-                    }
-
-                    val foundTokens = normalizedFound.split(
-                        Regex("""[^а-яa-z0-9]+""")
-                    )
-
-                    val matchedStreetTokens =
-                        streetTokens.count {
-                            foundTokens.contains(it)
-                        }
-
-                    if (matchedStreetTokens == 0) {
-                        continue
-                    }
-
-                    val foundHouseNumbers =
-                        extractHouseNumbers(foundAddress)
-
-                    if (houseNumbers.isNotEmpty()) {
-
-                        val houseMatched =
-                            houseNumbers.any { requested ->
-
-                                foundHouseNumbers.any { actual ->
-
-                                    actual == requested
-                                }
-                            }
-
-                        if (!houseMatched) {
-                            continue
-                        }
-                    }
-
-                    var score =
-                        matchedStreetTokens * 100
-
-                    if (houseNumbers.isNotEmpty()) {
-
-                        score += 500
-                    }
-
-                    if (
-                        item.optString("type") == "building"
-                    ) {
-
-                        score += 50
-                    }
-
-                    if (foundCity == requestedCity) {
-
-                        score += 100
-                    }
-
-                    candidates.add(
-                        Candidate(
-
-                            result = GeocodeResult(
-
-                                address = foundAddress,
-
-                                longitude = longitude,
-
-                                latitude = latitude,
-
-                                objectId = item.optString(
-                                    "id",
-                                    ""
-                                ).trim()
-                            ),
-
-                            score = score,
-
-                            city = searchCity
-                        )
-                    )
-                }
-
-            } finally {
-
-                connection.disconnect()
+                score -= 5
             }
         }
 
-        if (candidates.isEmpty()) {
-
-            return null
+        val city = CITIES.firstOrNull {
+            request.contains(it.lowercase(Locale.ROOT))
         }
 
-        val sorted = candidates.sortedByDescending {
-            it.score
+        if (city != null && result.contains(city.lowercase(Locale.ROOT))) {
+            score += 10
         }
 
-        if (
-            requestedCity == null &&
-            sorted.size > 1
-        ) {
-
-            val first = sorted[0]
-
-            val second = sorted[1]
-
-            if (
-                first.score == second.score &&
-                first.city != second.city
-            ) {
-
-                throw Exception(
-                    "Неоднозначный адрес. Укажите город: $address"
-                )
-            }
-        }
-
-        return sorted.first().result
+        return score
     }
 
-    // АВТОМАТИЧЕСКИЙ ПОИСК КООРДИНАТ
-
-    private fun geocodeAddresses() {
-
-        if (addresses.isEmpty()) {
-
-            routeButton.isEnabled = false
-
-            photoButton.isEnabled = true
-
-            return
-        }
-
-        val addressCopy = addresses.toList()
-
-        routeButton.isEnabled = false
-
-        photoButton.isEnabled = false
-
-        geocodedAddresses = emptyList()
-
-        warehousePoint = null
-
-        coordinatesText.text = ""
-
-        status.text = "Подключение к 2ГИС..."
-
-        executor.execute {
-
-            val results = mutableListOf<GeocodeResult>()
-
-            val notFound = mutableListOf<String>()
-
-            var warehouseError: String? = null
-
-            var foundWarehouse: GeocodeResult? = null
-
-            try {
-
-                runOnUiThread {
-
-                    status.text =
-                        "Поиск координат склада..."
-                }
-
-                foundWarehouse =
-                    geocodeAddress(warehouseAddress)
-                        ?: throw Exception(
-                            "Не удалось определить координаты склада"
-                        )
-
-            } catch (e: Exception) {
-
-                warehouseError = e.message
-            }
-
-            if (foundWarehouse != null) {
-
-                for (
-                    (index, address) in
-                    addressCopy.withIndex()
-                ) {
-
-                    runOnUiThread {
-
-                        status.text =
-                            "Поиск адреса ${index + 1} из ${addressCopy.size}..."
-                    }
-
-                    try {
-
-                        val result = geocodeAddress(address)
-
-                        if (result != null) {
-
-                            results.add(result)
-
-                        } else {
-
-                            notFound.add(address)
-                        }
-
-                    } catch (e: Exception) {
-
-                        notFound.add(
-                            "$address (ошибка: ${e.message})"
-                        )
-                    }
-                }
-            }
-
-            runOnUiThread {
-
-                warehousePoint = foundWarehouse
-
-                geocodedAddresses = results.toList()
-
-                val output = StringBuilder()
-
-                output.append(
-                    "СКЛАД — НАЧАЛО И КОНЕЦ МАРШРУТА\n"
-                )
-
-                output.append(warehouseAddress)
-
-                output.append("\n\n")
-
-                output.append("НАЙДЕННЫЕ АДРЕСА: ")
-
-                output.append(results.size)
-
-                output.append("\n\n")
-
-                results.forEachIndexed { index, item ->
-
-                    output.append("${index + 1}. ")
-
-                    output.append(item.address)
-
-                    output.append("\n")
-
-                    output.append("Долгота: ")
-
-                    output.append(item.longitude)
-
-                    output.append("\n")
-
-                    output.append("Широта: ")
-
-                    output.append(item.latitude)
-
-                    output.append("\n")
-
-                    output.append("ID 2ГИС: ")
-
-                    output.append(
-                        item.objectId.ifBlank {
-                            "не предоставлен API"
-                        }
-                    )
-
-                    output.append("\n\n")
-                }
-
-                if (notFound.isNotEmpty()) {
-
-                    output.append(
-                        "НЕ НАЙДЕНЫ — ПРОВЕРЬТЕ ВРУЧНУЮ:\n"
-                    )
-
-                    notFound.forEachIndexed { index, address ->
-
-                        output.append(
-                            "${index + 1}. $address\n"
-                        )
-                    }
-                }
-
-                coordinatesText.text =
-                    output.toString()
-
-                status.text = when {
-
-                    warehouseError != null ->
-
-                        "Ошибка определения склада: $warehouseError"
-
-                    results.size > 10 ->
-
-                        "Найдено ${results.size}. Максимум 10 адресов доставки"
-
-                    notFound.isNotEmpty() ->
-
-                        "Найдено: ${results.size}, не найдено: ${notFound.size}. Проверьте адреса"
-
-                    results.size == addressCopy.size ->
-
-                        "Все адреса найдены. Маршрут готов к открытию в 2ГИС"
-
-                    else ->
-
-                        "Не удалось подготовить маршрут"
-                }
-
-                routeButton.isEnabled =
-                    foundWarehouse != null &&
-                        results.size == addressCopy.size &&
-                        results.isNotEmpty() &&
-                        results.size <= 10
-
-                photoButton.isEnabled = true
-            }
-        }
-    }
-
-    // ПОСТРОЕНИЕ И ОТКРЫТИЕ МАРШРУТА В 2ГИС
+    // ---------------------------------------------------------
+    // ПОСТРОЕНИЕ МАРШРУТА
+    // ---------------------------------------------------------
 
     private fun openRouteIn2Gis() {
-
         val warehouse = warehousePoint
 
-        if (warehouse == null) {
-
-            Toast.makeText(
-                this,
-                "Не удалось определить координаты склада",
-                Toast.LENGTH_LONG
-            ).show()
-
+        if (warehouse == null || coordinates.isEmpty()) {
+            showMessage("Сначала определите координаты")
             return
         }
 
-        if (geocodedAddresses.isEmpty()) {
-
-            Toast.makeText(
-                this,
-                "Нет найденных адресов",
-                Toast.LENGTH_LONG
-            ).show()
-
+        if (coordinates.size > MAX_ADDRESSES) {
+            showMessage("Слишком много адресов")
             return
         }
 
-        if (geocodedAddresses.size > 10) {
-
-            Toast.makeText(
-                this,
-                "Максимум 10 адресов доставки",
-                Toast.LENGTH_LONG
-            ).show()
-
-            return
-        }
-
-        val points = mutableListOf<GeocodeResult>()
-
-        // Начало маршрута — склад
+        val points = mutableListOf<GeoPoint>()
 
         points.add(warehouse)
-
-        // Все адреса доставки
-
-        points.addAll(geocodedAddresses)
-
-        // Конец маршрута — тот же склад
-
+        points.addAll(coordinates)
         points.add(warehouse)
 
-        val pointsPath = points.joinToString("|") {
-
-            point ->
-
-            String.format(
+        val pointsPath = points.joinToString("|") { point ->
+            val coordinatesText = String.format(
                 Locale.US,
                 "%.6f,%.6f",
-                point.longitude,
-                point.latitude
+                point.lon,
+                point.lat
             )
+
+            if (!point.objectId.isNullOrBlank()) {
+                "$coordinatesText;${point.objectId}"
+            } else {
+                coordinatesText
+            }
         }
 
         val routeUrl =
-            "https://2gis.ru/naberezhnye-chelny/directions/tab/car/points/$pointsPath"
+            "https://2gis.ru/naberezhnye-chelny/directions/" +
+                "tab/car/points/$pointsPath"
 
         try {
-
-            val routeUri = Uri.parse(routeUrl)
-
-            // Сначала пробуем открыть приложение 2ГИС
-
-            val dgIsIntent = Intent(
+            val intent = Intent(
                 Intent.ACTION_VIEW,
-                routeUri
-            ).apply {
+                Uri.parse(routeUrl)
+            )
 
-                setPackage(
-                    "ru.dublgis.dgismobile"
-                )
-            }
+            intent.setPackage("ru.dublgis.dgismobile")
 
             try {
-
-                startActivity(dgIsIntent)
-
-            } catch (e: ActivityNotFoundException) {
-
-                // Если приложение не установлено,
-                // открываем маршрут через браузер.
-
-                startActivity(
-                    Intent(
-                        Intent.ACTION_VIEW,
-                        routeUri
-                    )
+                startActivity(intent)
+            } catch (_: Exception) {
+                val fallback = Intent(
+                    Intent.ACTION_VIEW,
+                    Uri.parse(routeUrl)
                 )
+                startActivity(fallback)
             }
 
         } catch (e: Exception) {
-
-            status.text =
-                "Не удалось открыть маршрут: ${e.message}"
-
-            Toast.makeText(
-                this,
-                "Ошибка передачи маршрута в 2ГИС",
-                Toast.LENGTH_LONG
-            ).show()
+            showMessage("Не удалось открыть 2ГИС: ${e.message}")
         }
     }
 
-    // РАСПОЗНАВАНИЕ ФОТОГРАФИИ
-
-    private fun recognizePhoto(file: File) {
-
-        photoButton.isEnabled = false
-
-        routeButton.isEnabled = false
-
-        invalidateRouteData()
-
-        status.text = "Подготовка фотографии..."
-
-        executor.execute {
-
-            var original: Bitmap? = null
-
-            var gray: Bitmap? = null
-
-            var binary: Bitmap? = null
-
-            var tess: TessBaseAPI? = null
-
-            try {
-
-                val directory = File(
-                    filesDir,
-                    "tesseract"
-                )
-
-                directory.mkdirs()
-
-                runOnUiThread {
-
-                    status.text =
-                        "Загрузка русского языка..."
-                }
-
-                downloadRussianLanguage(directory)
-
-                runOnUiThread {
-
-                    status.text =
-                        "Обработка фотографии..."
-                }
-
-                original = loadOrientedBitmap(file)
-
-                val processed = createProcessedImages(
-                    original
-                )
-
-                gray = processed.first
-
-                binary = processed.second
-
-                runOnUiThread {
-
-                    status.text =
-                        "Распознавание адресов..."
-                }
-
-                tess = TessBaseAPI()
-
-                if (
-                    !tess.init(
-                        directory.absolutePath,
-                        "rus",
-                        TessBaseAPI.OEM_LSTM_ONLY
-                    )
-                ) {
-
-                    throw Exception(
-                        "Не удалось запустить Tesseract"
-                    )
-                }
-
-                tess.setVariable(
-                    "preserve_interword_spaces",
-                    "1"
-                )
-
-                tess.setVariable(
-                    "user_defined_dpi",
-                    "300"
-                )
-
-                val recognizedText = recognizeVariants(
-                    tess,
-                    listOf(
-                        original,
-                        gray,
-                        binary
-                    )
-                )
-
-                val foundAddresses =
-                    extractAddresses(recognizedText)
-
-                runOnUiThread {
-
-                    showAddresses(foundAddresses)
-
-                    if (foundAddresses.isEmpty()) {
-
-                        status.text =
-                            "Адреса не найдены. Попробуйте другое фото."
-
-                        photoButton.isEnabled = true
-
-                    } else {
-
-                        status.text =
-                            "Адреса распознаны. Поиск координат..."
-
-                        geocodeAddresses()
-                    }
-                }
-
-            } catch (e: Exception) {
-
-                runOnUiThread {
-
-                    status.text =
-                        "Ошибка: ${e.javaClass.simpleName}: ${e.message}"
-
-                    photoButton.isEnabled = true
-
-                    routeButton.isEnabled = false
-                }
-
-            } finally {
-
-                tess?.recycle()
-
-                original?.recycle()
-
-                gray?.recycle()
-
-                binary?.recycle()
-            }
-        }
+    private fun showMessage(message: String) {
+        Toast.makeText(
+            this,
+            message,
+            Toast.LENGTH_LONG
+        ).show()
     }
-
-    // ЗАКРЫТИЕ ПРИЛОЖЕНИЯ
 
     override fun onDestroy() {
-
-        executor.shutdown()
-
         super.onDestroy()
+        executor.shutdown()
+    }
+
+    private class SimpleTextWatcher(
+        private val callback: () -> Unit
+    ) : android.text.TextWatcher {
+
+        override fun beforeTextChanged(
+            s: CharSequence?,
+            start: Int,
+            count: Int,
+            after: Int
+        ) = Unit
+
+        override fun onTextChanged(
+            s: CharSequence?,
+            start: Int,
+            before: Int,
+            count: Int
+        ) {
+            callback()
+        }
+
+        override fun afterTextChanged(
+            s: android.text.Editable?
+        ) = Unit
     }
 }
