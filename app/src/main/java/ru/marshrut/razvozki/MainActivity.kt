@@ -886,7 +886,7 @@ class MainActivity : Activity() {
         showAddresses(addresses.toList())
     }
 
-    // ПОИСК КООРДИНАТ ЧЕРЕЗ API 2ГИС
+    // НОВЫЙ ПОИСК КООРДИНАТ ЧЕРЕЗ API 2ГИС
 
     private fun geocodeAddress(address: String): GeocodeResult? {
 
@@ -896,13 +896,31 @@ class MainActivity : Activity() {
             throw Exception("Не найден ключ DGIS_API_KEY")
         }
 
-        val normalizedInput = address.lowercase(Locale("ru"))
-            .replace("ё", "е")
-            .replace(Regex("""[^а-яa-z0-9/ -]"""), " ")
+        fun normalize(value: String): String {
+            return value.lowercase(Locale("ru"))
+                .replace("ё", "е")
+                .replace(Regex("""[.,;:]"""), " ")
+                .replace(Regex("""\s+"""), " ")
+                .trim()
+        }
+
+        // Убираем почтовый индекс и лишние административные слова
+        val cleanedAddress = address
+            .replace(Regex("""\b\d{6}\b"""), " ")
+            .replace(Regex("""(?i)\bроссия\b"""), " ")
+            .replace(Regex("""(?i)\bреспублика\b"""), " ")
+            .replace(Regex("""(?i)\bцентральный район\b"""), " ")
             .replace(Regex("""\s+"""), " ")
             .trim()
+            .trim(',', ';')
 
-        val cityNames = listOf(
+        if (cleanedAddress.isBlank()) {
+            throw Exception("Пустой адрес")
+        }
+
+        val input = normalize(cleanedAddress)
+
+        val cities = listOf(
             "набережные челны",
             "нижнекамск",
             "казань",
@@ -915,46 +933,61 @@ class MainActivity : Activity() {
             "москва"
         )
 
-        val hasCity = cityNames.any {
-            normalizedInput.contains(it)
+        val city = cities.firstOrNull {
+            input.contains(it)
         }
 
-        val queries = buildList {
+        val queries = linkedSetOf<String>()
 
-            add(address.trim())
+        queries.add(cleanedAddress)
 
-            if (
-                !hasCity &&
-                !normalizedInput.contains("республика") &&
-                !normalizedInput.contains("татарстан")
-            ) {
-                add("$address, Набережные Челны, Республика Татарстан")
-            }
+        if (city == null) {
+            queries.add("$cleanedAddress, Набережные Челны")
+            queries.add("$cleanedAddress, Нижнекамск")
+            queries.add("$cleanedAddress, Елабуга")
+            queries.add("$cleanedAddress, Менделеевск")
+            queries.add("$cleanedAddress, Казань")
+        }
 
-        }.distinct()
-
-        val houseMatches = Regex(
+        // Выделяем номера домов
+        val houseRegex = Regex(
             """\b\d{1,5}(?:\s*[/\-]\s*\d{1,5})?\s*[а-яa-z]?\b""",
             RegexOption.IGNORE_CASE
-        ).findAll(normalizedInput)
-            .map {
-                it.value.replace(Regex("""\s+"""), "")
-                    .lowercase(Locale("ru"))
-            }
-            .toList()
+        )
 
-        val streetTokens = normalizedInput
-            .split(Regex("""[^а-яa-z0-9]+"""))
+        val houseNumbers = houseRegex.findAll(cleanedAddress)
+            .map {
+                it.value.lowercase(Locale("ru"))
+                    .replace(Regex("""\s+"""), "")
+                    .replace("-", "/")
+            }
+            .toSet()
+
+        val excludedWords = setOf(
+            "улица", "ул", "проезд", "пр", "проспект",
+            "переулок", "пер", "шоссе", "ш",
+            "бульвар", "б-р", "набережная", "наб",
+            "площадь", "пл", "микрорайон", "мкр",
+            "дом", "д", "корпус", "корп", "строение",
+            "стр", "квартира", "кв", "россия",
+            "республика", "татарстан", "набережные",
+            "челны", "нижнекамск", "казань", "елабуга",
+            "менделеевск", "мамадыш", "заинск",
+            "альметьевск", "ижевск", "москва",
+            "центральный", "район", "индекс"
+        )
+
+        val streetTokens = input
+            .split(Regex("""[^а-яa-z]+"""))
             .filter {
-                it.length >= 3 && it !in setOf(
-                    "улица", "проезд", "проспект", "переулок",
-                    "шоссе", "бульвар", "набережная",
-                    "микрорайон", "дом", "корпус",
-                    "строение", "квартира", "набережные",
-                    "челны", "республика", "татарстан", "россия"
-                )
+                it.length >= 3 &&
+                    it !in excludedWords
             }
             .distinct()
+
+        if (streetTokens.isEmpty()) {
+            throw Exception("Не удалось определить улицу: $address")
+        }
 
         var best: GeocodeResult? = null
         var bestScore = Int.MIN_VALUE
@@ -969,7 +1002,7 @@ class MainActivity : Activity() {
                 .appendQueryParameter("locale", "ru_RU")
                 .appendQueryParameter(
                     "fields",
-                    "items.point,items.full_address_name"
+                    "items.point,items.full_address_name,items.address"
                 )
                 .appendQueryParameter("page_size", "10")
                 .build()
@@ -982,7 +1015,12 @@ class MainActivity : Activity() {
                 connection.requestMethod = "GET"
                 connection.connectTimeout = 20000
                 connection.readTimeout = 30000
-                connection.setRequestProperty("Accept", "application/json")
+
+                connection.setRequestProperty(
+                    "Accept",
+                    "application/json"
+                )
+
                 connection.connect()
 
                 val responseCode = connection.responseCode
@@ -1010,7 +1048,7 @@ class MainActivity : Activity() {
                     ?.optInt("code", 200) ?: 200
 
                 if (apiCode != 200) {
-                    throw Exception("Ошибка 2ГИС: код $apiCode")
+                    throw Exception("Ошибка API 2ГИС: $apiCode")
                 }
 
                 val items = json.optJSONObject("result")
@@ -1019,6 +1057,7 @@ class MainActivity : Activity() {
                 for (i in 0 until items.length()) {
 
                     val item = items.optJSONObject(i) ?: continue
+
                     val point = item.optJSONObject("point") ?: continue
 
                     val longitude = point.optDouble("lon", Double.NaN)
@@ -1031,55 +1070,57 @@ class MainActivity : Activity() {
                         latitude !in -90.0..90.0
                     ) continue
 
-                    val foundAddress = item
-                        .optString("full_address_name", "")
-                        .trim()
+                    val foundAddress = item.optString(
+                        "full_address_name",
+                        ""
+                    ).ifBlank {
+                        item.optJSONObject("address")
+                            ?.optString("name", "") ?: ""
+                    }.trim()
 
                     if (foundAddress.isBlank()) continue
 
-                    val normalizedFound = foundAddress
-                        .lowercase(Locale("ru"))
-                        .replace("ё", "е")
-                        .replace(Regex("""[^а-яa-z0-9/ -]"""), " ")
-                        .replace(Regex("""\s+"""), " ")
-                        .trim()
+                    val found = normalize(foundAddress)
 
-                    val foundNumberTokens = Regex(
-                        """\b\d{1,5}(?:\s*[/\-]\s*\d{1,5})?\s*[а-яa-z]?\b""",
-                        RegexOption.IGNORE_CASE
-                    ).findAll(normalizedFound)
+                    val foundHouseNumbers = houseRegex.findAll(foundAddress)
                         .map {
-                            it.value.replace(Regex("""\s+"""), "")
-                                .lowercase(Locale("ru"))
+                            it.value.lowercase(Locale("ru"))
+                                .replace(Regex("""\s+"""), "")
+                                .replace("-", "/")
                         }
                         .toSet()
 
-                    val houseMatched =
-                        houseMatches.any { it in foundNumberTokens }
+                    val houseMatched = houseNumbers.isEmpty() ||
+                        houseNumbers.any { requested ->
+                            foundHouseNumbers.any { actual ->
+                                actual == requested
+                            }
+                        }
 
-                    if (
-                        houseMatches.isNotEmpty() &&
-                        !houseMatched
-                    ) continue
+                    if (!houseMatched) continue
 
-                    val foundTokens = normalizedFound
-                        .split(Regex("""[^а-яa-z0-9]+"""))
+                    val foundTokens = found.split(
+                        Regex("""[^а-яa-z0-9]+""")
+                    )
 
                     val matchedStreetTokens = streetTokens.count {
                         foundTokens.contains(it)
                     }
 
-                    if (
-                        streetTokens.isNotEmpty() &&
-                        matchedStreetTokens == 0
-                    ) continue
+                    if (matchedStreetTokens == 0) continue
 
-                    var score = matchedStreetTokens * 10
+                    var score = matchedStreetTokens * 20
 
-                    if (houseMatched) score += 100
+                    if (houseMatched && houseNumbers.isNotEmpty()) {
+                        score += 200
+                    }
 
-                    if (normalizedFound.contains("набережные челны")) {
-                        score += 2
+                    if (city != null && found.contains(city)) {
+                        score += 50
+                    }
+
+                    if (item.optString("type") == "building") {
+                        score += 30
                     }
 
                     if (score > bestScore) {
@@ -1166,7 +1207,7 @@ class MainActivity : Activity() {
                         }
 
                     } catch (e: Exception) {
-                        notFound.add(address)
+                        notFound.add("$address (ошибка: ${e.message})")
                     }
                 }
             }
@@ -1223,7 +1264,7 @@ class MainActivity : Activity() {
                         "Найдено ${results.size}. Максимум 10 адресов доставки в одном маршруте"
 
                     notFound.isNotEmpty() ->
-                        "Найдено: ${results.size}, не найдено: ${notFound.size}. Исправьте адреса и сохраните изменения"
+                        "Найдено: ${results.size}, не найдено: ${notFound.size}. Проверьте адреса"
 
                     results.size == addressCopy.size ->
                         "Все адреса найдены. Маршрут готов к открытию в 2ГИС"
@@ -1329,7 +1370,7 @@ class MainActivity : Activity() {
         }
     }
 
-    // РАСПОЗНАВАНИЕ ФОТОГРАФИИ И АВТОПОИСК КООРДИНАТ
+    // РАСПОЗНАВАНИЕ ФОТОГРАФИИ
 
     private fun recognizePhoto(file: File) {
 
