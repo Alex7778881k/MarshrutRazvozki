@@ -27,6 +27,13 @@ jobs:
         with:
           gradle-version: 8.9
 
+      - name: Check AndroidManifest.xml
+        run: |
+          echo "Проверка AndroidManifest.xml"
+          cat -A app/src/main/AndroidManifest.xml
+          echo "Проверка XML"
+          python3 -c "import xml.etree.ElementTree as ET; ET.parse('app/src/main/AndroidManifest.xml'); print('XML OK')"
+
       - name: Build APK
         env:
           DGIS_API_KEY: ${{ secrets.DGIS_API_KEY }}
@@ -35,9 +42,14 @@ jobs:
             echo "Ошибка: DGIS_API_KEY не найден в GitHub Secrets"
             exit 1
           fi
-          gradle assembleDebug -PdgisApiKey="$DGIS_API_KEY"
+
+          gradle assembleDebug \
+            -PdgisApiKey="$DGIS_API_KEY" \
+            --stacktrace \
+            --info
 
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: MarshrutRazvozki-APK
