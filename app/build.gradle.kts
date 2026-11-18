@@ -16,6 +16,7 @@ android {
         applicationId = "ru.marshrut.razvozki"
         minSdk = 26
         targetSdk = 35
+
         versionCode = 5
         versionName = "1.4"
 
@@ -41,7 +42,10 @@ android {
 }
 
 dependencies {
+    // Распознавание текста с фотографий
     implementation("cz.adaptech.tesseract4android:tesseract4android:4.9.0")
+
+    // AndroidX
     implementation("androidx.core:core:1.15.0")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 }
