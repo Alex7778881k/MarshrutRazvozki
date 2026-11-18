@@ -5,11 +5,13 @@ import android.app.Activity
 import android.os.Bundle
 import android.content.Intent
 import android.content.ClipData
+import android.content.ActivityNotFoundException
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Matrix
 import android.net.Uri
+import android.provider.MediaStore
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
@@ -21,6 +23,7 @@ import android.widget.Toast
 import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
 import com.googlecode.tesseract.android.TessBaseAPI
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -47,6 +50,7 @@ class MainActivity : Activity() {
     private var photoFile: File? = null
 
     private val executor = Executors.newSingleThreadExecutor()
+
     private val cameraRequest = 1001
 
     private val warehouseAddress =
@@ -75,6 +79,13 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        createInterface()
+    }
+
+    // ИНТЕРФЕЙС
+
+    private fun createInterface() {
+
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(24, 24, 24, 24)
@@ -88,7 +99,9 @@ class MainActivity : Activity() {
 
         photoButton = Button(this).apply {
             text = "СФОТОГРАФИРОВАТЬ ЛИСТ"
-            setOnClickListener { takePhoto() }
+            setOnClickListener {
+                takePhoto()
+            }
         }
 
         status = TextView(this).apply {
@@ -114,7 +127,10 @@ class MainActivity : Activity() {
         routeButton = Button(this).apply {
             text = "ОТКРЫТЬ МАРШРУТ В 2ГИС"
             isEnabled = false
-            setOnClickListener { openRouteIn2Gis() }
+
+            setOnClickListener {
+                openRouteIn2Gis()
+            }
         }
 
         coordinatesText = TextView(this).apply {
@@ -157,14 +173,23 @@ class MainActivity : Activity() {
     // ФОТОГРАФИРОВАНИЕ
 
     private fun takePhoto() {
+
         try {
+
             val directory = File(cacheDir, "camera")
-            directory.mkdirs()
+
+            if (!directory.exists() && !directory.mkdirs()) {
+                throw Exception("Не удалось создать папку камеры")
+            }
 
             photoFile = File(
                 directory,
                 "photo_${System.currentTimeMillis()}.jpg"
             )
+
+            if (photoFile!!.exists()) {
+                photoFile!!.delete()
+            }
 
             photoUri = FileProvider.getUriForFile(
                 this,
@@ -172,36 +197,72 @@ class MainActivity : Activity() {
                 photoFile!!
             )
 
+            val uri = photoUri
+                ?: throw Exception("Не удалось создать URI фотографии")
+
             val intent = Intent(
-                android.provider.MediaStore.ACTION_IMAGE_CAPTURE
-            ).apply {
-                putExtra(
-                    android.provider.MediaStore.EXTRA_OUTPUT,
-                    photoUri
-                )
+                MediaStore.ACTION_IMAGE_CAPTURE
+            )
 
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            intent.putExtra(
+                MediaStore.EXTRA_OUTPUT,
+                uri
+            )
 
-                clipData = ClipData.newUri(
-                    contentResolver,
-                    "Фотография листа",
-                    photoUri
-                )
-            }
+            intent.addFlags(
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
 
-            if (intent.resolveActivity(packageManager) == null) {
-                throw Exception("Камера не найдена")
-            }
+            intent.clipData = ClipData.newUri(
+                contentResolver,
+                "Фотография листа доставки",
+                uri
+            )
 
             photoButton.isEnabled = false
-            startActivityForResult(intent, cameraRequest)
+            routeButton.isEnabled = false
+
+            status.text = "Запуск камеры..."
+
+            // ВАЖНО:
+            // Не используем resolveActivity().
+            // Некоторые устройства возвращают null,
+            // даже если приложение камеры установлено.
+
+            startActivityForResult(
+                intent,
+                cameraRequest
+            )
+
+        } catch (e: ActivityNotFoundException) {
+
+            photoButton.isEnabled = true
+
+            status.text = "Приложение камеры не найдено"
+
+            Toast.makeText(
+                this,
+                "На устройстве не найдено приложение камеры",
+                Toast.LENGTH_LONG
+            ).show()
 
         } catch (e: Exception) {
-            status.text = "Ошибка камеры: ${e.message}"
+
             photoButton.isEnabled = true
+
+            status.text =
+                "Ошибка запуска камеры: ${e.javaClass.simpleName}: ${e.message}"
+
+            Toast.makeText(
+                this,
+                "Ошибка камеры: ${e.message}",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
+
+    // ПОЛУЧЕНИЕ РЕЗУЛЬТАТА КАМЕРЫ
 
     @Deprecated("Используется для совместимости")
     override fun onActivityResult(
@@ -209,75 +270,125 @@ class MainActivity : Activity() {
         resultCode: Int,
         data: Intent?
     ) {
-        super.onActivityResult(requestCode, resultCode, data)
 
-        if (requestCode == cameraRequest) {
+        super.onActivityResult(
+            requestCode,
+            resultCode,
+            data
+        )
 
-            if (resultCode == Activity.RESULT_OK) {
+        if (requestCode != cameraRequest) return
 
-                val file = photoFile
+        if (resultCode == Activity.RESULT_OK) {
 
-                if (file != null && file.exists() && file.length() > 0) {
-                    recognizePhoto(file)
-                } else {
-                    status.text = "Камера не сохранила фотографию"
-                    photoButton.isEnabled = true
-                }
+            val file = photoFile
+
+            if (
+                file != null &&
+                file.exists() &&
+                file.length() > 1000
+            ) {
+
+                status.text = "Фотография получена. Подготовка..."
+
+                recognizePhoto(file)
 
             } else {
-                status.text = "Фотографирование отменено"
+
                 photoButton.isEnabled = true
+
+                status.text =
+                    "Камера не сохранила фотографию. Попробуйте ещё раз."
+
+                Toast.makeText(
+                    this,
+                    "Файл фотографии отсутствует или пустой",
+                    Toast.LENGTH_LONG
+                ).show()
             }
+
+        } else {
+
+            photoButton.isEnabled = true
+
+            status.text = "Фотографирование отменено"
+
         }
     }
 
-    // ЗАГРУЗКА РУССКОГО TESSERACT
+    // ЗАГРУЗКА РУССКОГО ЯЗЫКА TESSERACT
 
     private fun downloadRussianLanguage(directory: File) {
 
         val tessdata = File(directory, "tessdata")
-        tessdata.mkdirs()
 
-        val languageFile = File(tessdata, "rus.traineddata")
+        if (!tessdata.exists()) {
+            tessdata.mkdirs()
+        }
 
-        if (languageFile.exists() && languageFile.length() > 5000000) {
+        val languageFile = File(
+            tessdata,
+            "rus.traineddata"
+        )
+
+        if (
+            languageFile.exists() &&
+            languageFile.length() > 5000000
+        ) {
             return
         }
 
         languageFile.delete()
 
-        val temporaryFile = File(tessdata, "rus.tmp")
+        val temporaryFile = File(
+            tessdata,
+            "rus.tmp"
+        )
 
         val connection = URL(
             "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/main/rus.traineddata"
         ).openConnection() as HttpURLConnection
 
         try {
+
             connection.connectTimeout = 30000
             connection.readTimeout = 120000
             connection.connect()
 
-            if (connection.responseCode != HttpURLConnection.HTTP_OK) {
+            if (
+                connection.responseCode !=
+                HttpURLConnection.HTTP_OK
+            ) {
+
                 throw Exception(
                     "Ошибка загрузки русского языка: HTTP ${connection.responseCode}"
                 )
             }
 
             connection.inputStream.use { input ->
+
                 FileOutputStream(temporaryFile).use { output ->
+
                     input.copyTo(output)
                 }
             }
 
             if (temporaryFile.length() < 5000000) {
-                throw Exception("Русский языковой файл загружен не полностью")
+
+                throw Exception(
+                    "Русский языковой файл загружен не полностью"
+                )
             }
 
             if (!temporaryFile.renameTo(languageFile)) {
-                throw Exception("Не удалось сохранить языковой файл")
+
+                throw Exception(
+                    "Не удалось сохранить языковой файл"
+                )
             }
 
         } finally {
+
             connection.disconnect()
         }
     }
@@ -290,10 +401,19 @@ class MainActivity : Activity() {
             inJustDecodeBounds = true
         }
 
-        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        BitmapFactory.decodeFile(
+            file.absolutePath,
+            bounds
+        )
 
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
-            throw Exception("Не удалось прочитать фотографию")
+        if (
+            bounds.outWidth <= 0 ||
+            bounds.outHeight <= 0
+        ) {
+
+            throw Exception(
+                "Не удалось прочитать фотографию"
+            )
         }
 
         var sample = 1
@@ -313,9 +433,13 @@ class MainActivity : Activity() {
         var bitmap = BitmapFactory.decodeFile(
             file.absolutePath,
             options
-        ) ?: throw Exception("Не удалось открыть фотографию")
+        ) ?: throw Exception(
+            "Не удалось открыть фотографию"
+        )
 
-        val exif = ExifInterface(file.absolutePath)
+        val exif = ExifInterface(
+            file.absolutePath
+        )
 
         val orientation = exif.getAttributeInt(
             ExifInterface.TAG_ORIENTATION,
@@ -323,15 +447,20 @@ class MainActivity : Activity() {
         )
 
         val rotation = when (orientation) {
+
             ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+
             ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+
             ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+
             else -> 0f
         }
 
         if (rotation != 0f) {
 
             val matrix = Matrix()
+
             matrix.postRotate(rotation)
 
             val rotated = Bitmap.createBitmap(
@@ -345,14 +474,21 @@ class MainActivity : Activity() {
             )
 
             bitmap.recycle()
+
             bitmap = rotated
         }
 
-        val maxDimension = maxOf(bitmap.width, bitmap.height)
+        val maxDimension = maxOf(
+            bitmap.width,
+            bitmap.height
+        )
 
         if (maxDimension < 2600) {
 
-            val scale = minOf(1.35f, 2600f / maxDimension)
+            val scale = minOf(
+                1.35f,
+                2600f / maxDimension
+            )
 
             val enlarged = Bitmap.createScaledBitmap(
                 bitmap,
@@ -380,7 +516,9 @@ class MainActivity : Activity() {
         val width = source.width
         val height = source.height
 
-        val pixels = IntArray(width * height)
+        val pixels = IntArray(
+            width * height
+        )
 
         source.getPixels(
             pixels,
@@ -404,15 +542,20 @@ class MainActivity : Activity() {
 
             var gray = (
                 0.299 * red +
-                0.587 * green +
-                0.114 * blue
-            ).toInt()
+                    0.587 * green +
+                    0.114 * blue
+                ).toInt()
 
-            gray = ((gray - 128) * 1.35 + 128)
-                .toInt()
-                .coerceIn(0, 255)
+            gray = (
+                (gray - 128) * 1.35 + 128
+                ).toInt().coerceIn(0, 255)
 
-            pixels[i] = Color.rgb(gray, gray, gray)
+            pixels[i] = Color.rgb(
+                gray,
+                gray,
+                gray
+            )
+
             histogram[gray]++
         }
 
@@ -421,6 +564,7 @@ class MainActivity : Activity() {
         var sum = 0L
 
         for (i in 0..255) {
+
             sum += i.toLong() * histogram[i]
         }
 
@@ -435,25 +579,29 @@ class MainActivity : Activity() {
 
             if (weightBackground == 0) continue
 
-            val weightForeground = total - weightBackground
+            val weightForeground =
+                total - weightBackground
 
             if (weightForeground == 0) break
 
             sumBackground += i.toLong() * histogram[i]
 
             val meanBackground =
-                sumBackground.toDouble() / weightBackground
+                sumBackground.toDouble() /
+                    weightBackground
 
             val meanForeground =
-                (sum - sumBackground).toDouble() / weightForeground
+                (sum - sumBackground).toDouble() /
+                    weightForeground
 
             val variance =
                 weightBackground.toDouble() *
-                weightForeground.toDouble() *
-                (meanBackground - meanForeground) *
-                (meanBackground - meanForeground)
+                    weightForeground.toDouble() *
+                    (meanBackground - meanForeground) *
+                    (meanBackground - meanForeground)
 
             if (variance > maximumVariance) {
+
                 maximumVariance = variance
                 threshold = i
             }
@@ -502,7 +650,10 @@ class MainActivity : Activity() {
             height
         )
 
-        return Pair(grayBitmap, binaryBitmap)
+        return Pair(
+            grayBitmap,
+            binaryBitmap
+        )
     }
 
     // РАСПОЗНАВАНИЕ РАЗНЫХ ВАРИАНТОВ ФОТО
@@ -513,8 +664,11 @@ class MainActivity : Activity() {
     ): String {
 
         val modes = intArrayOf(
+
             TessBaseAPI.PageSegMode.PSM_AUTO,
+
             TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK,
+
             TessBaseAPI.PageSegMode.PSM_SINGLE_COLUMN
         )
 
@@ -522,30 +676,44 @@ class MainActivity : Activity() {
         var bestScore = Int.MIN_VALUE
 
         for (image in images) {
+
             for (mode in modes) {
 
                 tess.setPageSegMode(mode)
+
                 tess.setImage(image)
 
-                val text = (tess.getUTF8Text() ?: "").trim()
+                val text = (
+                    tess.getUTF8Text() ?: ""
+                    ).trim()
 
                 if (text.isBlank()) continue
 
                 val confidence = tess.meanConfidence()
-                val addressCount = extractAddresses(text).size
 
-                val usefulLines = text.lines().count { line ->
-                    line.any { it.isLetterOrDigit() }
+                val addressCount =
+                    extractAddresses(text).size
+
+                val usefulLines = text.lines().count {
+
+                    line -> line.any {
+                        it.isLetterOrDigit()
+                    }
                 }
 
-                val score = addressCount * 1000 +
-                    confidence * 2 +
-                    usefulLines.coerceAtMost(100)
+                val score =
+                    addressCount * 1000 +
+                        confidence * 2 +
+                        usefulLines.coerceAtMost(100)
 
                 if (
                     score > bestScore ||
-                    (score == bestScore && text.length > bestText.length)
+                    (
+                        score == bestScore &&
+                            text.length > bestText.length
+                        )
                 ) {
+
                     bestScore = score
                     bestText = text
                 }
@@ -555,37 +723,59 @@ class MainActivity : Activity() {
         return bestText
     }
 
-    // ВЫДЕЛЕНИЕ АДРЕСОВ
+    // ВЫДЕЛЕНИЕ АДРЕСОВ ИЗ ТЕКСТА
 
-    private fun extractAddresses(text: String): List<String> {
+    private fun extractAddresses(
+        text: String
+    ): List<String> {
 
         val lines = text
             .replace('\r', '\n')
             .split('\n')
             .map {
-                it.replace(Regex("""^[\s\-•*]+"""), "")
-                    .trim()
+
+                it.replace(
+                    Regex("""^[\s\-•*]+"""),
+                    ""
+                ).trim()
             }
-            .filter { it.isNotBlank() }
+            .filter {
+                it.isNotBlank()
+            }
 
         val streetWords = listOf(
+
             "ул", "улица",
+
             "пр", "проспект",
+
             "пер", "переулок",
+
             "ш", "шоссе",
+
             "б-р", "бульвар",
+
             "пл", "площадь",
+
             "проезд", "пр-д",
+
             "наб", "набережная",
+
             "мкр", "микрорайон",
+
             "тер", "территория",
+
             "тракт"
         )
 
         val addressWords = streetWords + listOf(
+
             "д", "дом",
+
             "корп", "корпус",
+
             "стр", "строение",
+
             "кв", "квартира"
         )
 
@@ -595,6 +785,7 @@ class MainActivity : Activity() {
         )
 
         fun normalized(line: String): String {
+
             return line
                 .lowercase(Locale("ru"))
                 .replace("ё", "е")
@@ -603,11 +794,15 @@ class MainActivity : Activity() {
                 .trim()
         }
 
-        fun hasWord(line: String, words: List<String>): Boolean {
+        fun hasWord(
+            line: String,
+            words: List<String>
+        ): Boolean {
 
             val value = normalized(line)
 
             return words.any { word ->
+
                 Regex(
                     """(?<![а-яa-z])${Regex.escape(word)}\.?(?![а-яa-z])""",
                     RegexOption.IGNORE_CASE
@@ -616,24 +811,34 @@ class MainActivity : Activity() {
         }
 
         fun hasNumber(line: String): Boolean {
+
             return numberPattern.containsMatchIn(line)
         }
 
         fun hasCity(line: String): Boolean {
+
             val value = normalized(line)
-            return cities.any { value.contains(it) }
+
+            return cities.any {
+                value.contains(it)
+            }
         }
 
         fun isAddress(line: String): Boolean {
 
-            val street = hasWord(line, addressWords)
+            val street = hasWord(
+                line,
+                addressWords
+            )
+
             val number = hasNumber(line)
+
             val city = hasCity(line)
 
             return (
                 street && number ||
-                city && number
-            ) && line.length >= 5
+                    city && number
+                ) && line.length >= 5
         }
 
         val combinedLines = mutableListOf<String>()
@@ -643,48 +848,73 @@ class MainActivity : Activity() {
         for (line in lines) {
 
             if (pending.isEmpty()) {
+
                 pending = line
                 continue
             }
 
-            val pendingHasStreet = hasWord(pending, streetWords)
-            val pendingHasNumber = hasNumber(pending)
-            val pendingHasCity = hasCity(pending)
+            val pendingHasStreet =
+                hasWord(pending, streetWords)
 
-            val currentHasStreet = hasWord(line, streetWords)
-            val currentHasNumber = hasNumber(line)
+            val pendingHasNumber =
+                hasNumber(pending)
+
+            val pendingHasCity =
+                hasCity(pending)
+
+            val currentHasStreet =
+                hasWord(line, streetWords)
+
+            val currentHasNumber =
+                hasNumber(line)
 
             val pendingComplete =
                 pendingHasStreet && pendingHasNumber ||
-                pendingHasCity && pendingHasNumber
+                    pendingHasCity && pendingHasNumber
 
             if (pendingComplete) {
+
                 combinedLines.add(pending)
+
                 pending = line
                 continue
             }
 
-            if (pendingHasStreet && currentHasStreet) {
+            if (
+                pendingHasStreet &&
+                currentHasStreet
+            ) {
+
                 combinedLines.add(pending)
+
                 pending = line
                 continue
             }
 
             val canJoin =
                 pendingHasCity && currentHasStreet ||
-                pendingHasStreet && currentHasNumber ||
-                pendingHasCity && currentHasNumber ||
-                hasWord(pending, addressWords) && currentHasNumber
+                    pendingHasStreet && currentHasNumber ||
+                    pendingHasCity && currentHasNumber ||
+                    hasWord(pending, addressWords) &&
+                    currentHasNumber
 
-            if (canJoin && pending.length + line.length < 180) {
+            if (
+                canJoin &&
+                pending.length + line.length < 180
+            ) {
+
                 pending = "$pending, $line"
+
             } else {
+
                 combinedLines.add(pending)
+
                 pending = line
             }
         }
 
         if (pending.isNotEmpty()) {
+
             combinedLines.add(pending)
         }
 
@@ -695,8 +925,14 @@ class MainActivity : Activity() {
             if (isAddress(line)) {
 
                 val cleaned = line
-                    .replace(Regex("""^[\s\-•*]+"""), "")
-                    .replace(Regex("""\s+"""), " ")
+                    .replace(
+                        Regex("""^[\s\-•*]+"""),
+                        ""
+                    )
+                    .replace(
+                        Regex("""\s+"""),
+                        " "
+                    )
                     .trim()
                     .trim(',', ';')
 
@@ -705,13 +941,18 @@ class MainActivity : Activity() {
                     cleaned.length >= 5 &&
                     cleaned.length <= 180
                 ) {
+
                     found.add(cleaned)
                 }
             }
         }
 
         return found.distinctBy {
-            normalized(it).replace(Regex("""[\s.,]+"""), "")
+
+            normalized(it).replace(
+                Regex("""[\s.,]+"""),
+                ""
+            )
         }
     }
 
@@ -720,79 +961,108 @@ class MainActivity : Activity() {
     private fun invalidateRouteData() {
 
         geocodedAddresses = emptyList()
+
         warehousePoint = null
 
         if (::routeButton.isInitialized) {
+
             routeButton.isEnabled = false
         }
 
         if (::coordinatesText.isInitialized) {
+
             coordinatesText.text = ""
         }
     }
 
     // ОТОБРАЖЕНИЕ АДРЕСОВ
 
-    private fun showAddresses(found: List<String>) {
+    private fun showAddresses(
+        found: List<String>
+    ) {
 
         addresses.clear()
+
         addresses.addAll(found)
 
         invalidateRouteData()
 
         addressesContainer.removeAllViews()
+
         coordinatesText.text = ""
 
-        countText.text = "Найдено адресов: ${addresses.size}"
+        countText.text =
+            "Найдено адресов: ${addresses.size}"
 
         if (addresses.isEmpty()) {
 
             val empty = TextView(this).apply {
-                text = "Адреса не найдены. Попробуйте сфотографировать лист ещё раз."
+
+                text =
+                    "Адреса не найдены. Попробуйте сфотографировать лист ещё раз."
+
                 textSize = 16f
+
                 setPadding(0, 16, 0, 16)
             }
 
             addressesContainer.addView(empty)
+
             return
         }
 
         addresses.forEachIndexed { index, address ->
 
             val row = LinearLayout(this).apply {
+
                 orientation = LinearLayout.HORIZONTAL
+
                 gravity = Gravity.CENTER_VERTICAL
+
                 setPadding(0, 6, 0, 6)
             }
 
             val number = TextView(this).apply {
+
                 text = "${index + 1}."
+
                 textSize = 16f
+
                 setPadding(4, 0, 10, 0)
             }
 
             val edit = EditText(this).apply {
+
                 setText(address)
+
                 textSize = 15f
+
                 minLines = 1
+
                 maxLines = 3
+
                 isSingleLine = false
             }
 
             val delete = Button(this).apply {
+
                 text = "X"
 
                 setOnClickListener {
 
-                    saveEditedAddresses(startSearch = false)
+                    saveEditedAddresses(
+                        startSearch = false
+                    )
 
                     if (index < addresses.size) {
+
                         addresses.removeAt(index)
                     }
 
                     renderAddresses()
 
                     if (addresses.isNotEmpty()) {
+
                         geocodeAddresses()
                     }
                 }
@@ -810,16 +1080,27 @@ class MainActivity : Activity() {
             )
 
             row.addView(delete)
+
             addressesContainer.addView(row)
 
-            edit.setOnFocusChangeListener { _, hasFocus ->
+            edit.setOnFocusChangeListener {
 
-                if (!hasFocus && index < addresses.size) {
+                _, hasFocus ->
 
-                    val updatedAddress = edit.text.toString().trim()
+                if (
+                    !hasFocus &&
+                    index < addresses.size
+                ) {
 
-                    if (addresses[index] != updatedAddress) {
+                    val updatedAddress =
+                        edit.text.toString().trim()
+
+                    if (
+                        addresses[index] != updatedAddress
+                    ) {
+
                         addresses[index] = updatedAddress
+
                         invalidateRouteData()
                     }
                 }
@@ -831,7 +1112,10 @@ class MainActivity : Activity() {
             text = "СОХРАНИТЬ ИЗМЕНЕНИЯ"
 
             setOnClickListener {
-                saveEditedAddresses(startSearch = true)
+
+                saveEditedAddresses(
+                    startSearch = true
+                )
             }
         }
 
@@ -840,23 +1124,32 @@ class MainActivity : Activity() {
 
     // СОХРАНЕНИЕ ИЗМЕНЕНИЙ
 
-    private fun saveEditedAddresses(startSearch: Boolean = true) {
+    private fun saveEditedAddresses(
+        startSearch: Boolean = true
+    ) {
 
         for (i in addresses.indices) {
 
             val row = addressesContainer.getChildAt(i)
 
-            if (row is LinearLayout && row.childCount >= 2) {
+            if (
+                row is LinearLayout &&
+                row.childCount >= 2
+            ) {
 
                 val edit = row.getChildAt(1)
 
                 if (edit is EditText) {
-                    addresses[i] = edit.text.toString().trim()
+
+                    addresses[i] =
+                        edit.text.toString().trim()
                 }
             }
         }
 
-        addresses.removeAll { it.isBlank() }
+        addresses.removeAll {
+            it.isBlank()
+        }
 
         renderAddresses()
 
@@ -866,18 +1159,27 @@ class MainActivity : Activity() {
             Toast.LENGTH_SHORT
         ).show()
 
-        if (startSearch && addresses.isNotEmpty()) {
+        if (
+            startSearch &&
+            addresses.isNotEmpty()
+        ) {
+
             geocodeAddresses()
         }
     }
 
     private fun renderAddresses() {
-        showAddresses(addresses.toList())
+
+        showAddresses(
+            addresses.toList()
+        )
     }
 
     // НОРМАЛИЗАЦИЯ АДРЕСА
 
-    private fun normalizeAddress(value: String): String {
+    private fun normalizeAddress(
+        value: String
+    ): String {
 
         return value
             .lowercase(Locale("ru"))
@@ -889,7 +1191,9 @@ class MainActivity : Activity() {
 
     // ОПРЕДЕЛЕНИЕ ГОРОДА
 
-    private fun detectCity(address: String): String? {
+    private fun detectCity(
+        address: String
+    ): String? {
 
         val value = normalizeAddress(address)
 
@@ -900,7 +1204,9 @@ class MainActivity : Activity() {
 
     // ВЫДЕЛЕНИЕ НОМЕРА ДОМА
 
-    private fun extractHouseNumbers(address: String): Set<String> {
+    private fun extractHouseNumbers(
+        address: String
+    ): Set<String> {
 
         val pattern = Regex(
             """(?i)(?:\bд\.?\s*)?(\d{1,5}\s*(?:[/\-]\s*\d{1,5})?\s*[а-яa-z]?)"""
@@ -911,69 +1217,274 @@ class MainActivity : Activity() {
 
                 match.groupValues[1]
                     .lowercase(Locale("ru"))
-                    .replace(Regex("""\s+"""), "")
+                    .replace(
+                        Regex("""\s+"""),
+                        ""
+                    )
                     .replace("-", "/")
-                    .takeIf { it.isNotBlank() }
+                    .takeIf {
+                        it.isNotBlank()
+                    }
             }
             .toSet()
     }
 
+    // ПОЛУЧЕНИЕ КООРДИНАТ ИЗ ОТВЕТА 2ГИС
+
+    private fun readCoordinates(
+        item: JSONObject
+    ): Pair<Double, Double>? {
+
+        fun readPoint(
+            obj: JSONObject?
+        ): Pair<Double, Double>? {
+
+            if (obj == null) return null
+
+            val longitude = obj.optDouble(
+                "lon",
+                Double.NaN
+            )
+
+            val latitude = obj.optDouble(
+                "lat",
+                Double.NaN
+            )
+
+            if (
+                longitude.isFinite() &&
+                latitude.isFinite() &&
+                longitude in -180.0..180.0 &&
+                latitude in -90.0..90.0
+            ) {
+
+                return Pair(
+                    longitude,
+                    latitude
+                )
+            }
+
+            return null
+        }
+
+        // Основной вариант API 2ГИС
+
+        readPoint(
+            item.optJSONObject("point")
+        )?.let {
+            return it
+        }
+
+        // Альтернативный вариант
+
+        val geometry = item.optJSONObject("geometry")
+
+        readPoint(
+            geometry?.optJSONObject("centroid")
+        )?.let {
+            return it
+        }
+
+        readPoint(
+            item.optJSONObject("centroid")
+        )?.let {
+            return it
+        }
+
+        // Иногда координаты приходят массивом
+
+        fun readArray(
+            array: JSONArray?
+        ): Pair<Double, Double>? {
+
+            if (array == null || array.length() < 2) {
+                return null
+            }
+
+            val longitude = array.optDouble(
+                0,
+                Double.NaN
+            )
+
+            val latitude = array.optDouble(
+                1,
+                Double.NaN
+            )
+
+            if (
+                longitude.isFinite() &&
+                latitude.isFinite() &&
+                longitude in -180.0..180.0 &&
+                latitude in -90.0..90.0
+            ) {
+
+                return Pair(
+                    longitude,
+                    latitude
+                )
+            }
+
+            return null
+        }
+
+        readArray(
+            geometry?.optJSONArray("centroid")
+        )?.let {
+            return it
+        }
+
+        readArray(
+            geometry?.optJSONArray("coordinates")
+        )?.let {
+            return it
+        }
+
+        return null
+    }
+
     // ГЕОКОДИРОВАНИЕ ЧЕРЕЗ API 2ГИС 3.0
 
-    private fun geocodeAddress(address: String): GeocodeResult? {
+    private fun geocodeAddress(
+        address: String
+    ): GeocodeResult? {
 
         val apiKey = BuildConfig.DGIS_API_KEY
 
         if (apiKey.isBlank()) {
-            throw Exception("Не найден ключ DGIS_API_KEY")
+
+            throw Exception(
+                "Не найден ключ DGIS_API_KEY"
+            )
         }
 
         val cleanedAddress = address
-            .replace(Regex("""\b\d{6}\b"""), " ")
-            .replace(Regex("""(?i)\bроссия\b"""), " ")
-            .replace(Regex("""(?i)\bреспублика\b"""), " ")
-            .replace(Regex("""(?i)\bтатарстан\b"""), " ")
-            .replace(Regex("""(?i)\bцентральный район\b"""), " ")
-            .replace(Regex("""\s+"""), " ")
+            .replace(
+                Regex("""\b\d{6}\b"""),
+                " "
+            )
+            .replace(
+                Regex("""(?i)\bроссия\b"""),
+                " "
+            )
+            .replace(
+                Regex("""(?i)\bреспублика\b"""),
+                " "
+            )
+            .replace(
+                Regex("""(?i)\bтатарстан\b"""),
+                " "
+            )
+            .replace(
+                Regex("""(?i)\bцентральный район\b"""),
+                " "
+            )
+            .replace(
+                Regex("""\s+"""),
+                " "
+            )
             .trim()
             .trim(',', ';')
 
         if (cleanedAddress.isBlank()) {
+
             throw Exception("Пустой адрес")
         }
 
-        val requestedCity = detectCity(cleanedAddress)
-        val houseNumbers = extractHouseNumbers(cleanedAddress)
+        val requestedCity =
+            detectCity(cleanedAddress)
+
+        val houseNumbers =
+            extractHouseNumbers(cleanedAddress)
 
         val excludedWords = setOf(
-            "улица", "ул", "проезд", "пр", "проспект",
-            "переулок", "пер", "шоссе", "ш",
-            "бульвар", "б-р", "набережная", "наб",
-            "площадь", "пл", "микрорайон", "мкр",
-            "дом", "д", "корпус", "корп", "строение",
-            "стр", "квартира", "кв", "россия",
-            "республика", "татарстан",
-            "набережные", "челны",
-            "нижнекамск", "казань", "елабуга",
-            "менделеевск", "мамадыш", "заинск",
-            "альметьевск", "ижевск", "москва",
-            "центральный", "район", "индекс"
+
+            "улица", "ул",
+
+            "проезд", "пр",
+
+            "проспект",
+
+            "переулок", "пер",
+
+            "шоссе", "ш",
+
+            "бульвар", "б-р",
+
+            "набережная", "наб",
+
+            "площадь", "пл",
+
+            "микрорайон", "мкр",
+
+            "дом", "д",
+
+            "корпус", "корп",
+
+            "строение", "стр",
+
+            "квартира", "кв",
+
+            "россия",
+
+            "республика",
+
+            "татарстан",
+
+            "набережные",
+
+            "челны",
+
+            "нижнекамск",
+
+            "казань",
+
+            "елабуга",
+
+            "менделеевск",
+
+            "мамадыш",
+
+            "заинск",
+
+            "альметьевск",
+
+            "ижевск",
+
+            "москва",
+
+            "центральный",
+
+            "район",
+
+            "индекс"
         )
 
-        val streetTokens = normalizeAddress(cleanedAddress)
-            .split(Regex("""[^а-яa-z]+"""))
+        val streetTokens = normalizeAddress(
+            cleanedAddress
+        )
+            .split(
+                Regex("""[^а-яa-z]+""")
+            )
             .filter {
-                it.length >= 3 && it !in excludedWords
+
+                it.length >= 3 &&
+                    it !in excludedWords
             }
             .distinct()
 
         if (streetTokens.isEmpty()) {
-            throw Exception("Не удалось определить улицу: $address")
+
+            throw Exception(
+                "Не удалось определить улицу: $address"
+            )
         }
 
         val searchCities = if (requestedCity != null) {
+
             listOf(requestedCity)
+
         } else {
+
             cities
         }
 
@@ -987,28 +1498,53 @@ class MainActivity : Activity() {
 
         for (searchCity in searchCities) {
 
-            val searchText = "$cleanedAddress, $searchCity"
+            // Не дублируем город, если он уже есть в адресе.
+
+            val searchText = if (requestedCity != null) {
+
+                cleanedAddress
+
+            } else {
+
+                "$cleanedAddress, $searchCity"
+            }
 
             val requestUrl = Uri.parse(
                 "https://catalog.api.2gis.com/3.0/items/geocode"
             ).buildUpon()
-                .appendQueryParameter("q", searchText)
-                .appendQueryParameter("key", apiKey)
-                .appendQueryParameter("locale", "ru_RU")
+
                 .appendQueryParameter(
-                    "fields",
-                    "items.point,items.geometry.centroid"
+                    "q",
+                    searchText
                 )
-                .appendQueryParameter("page_size", "10")
+
+                .appendQueryParameter(
+                    "key",
+                    apiKey
+                )
+
+                .appendQueryParameter(
+                    "locale",
+                    "ru_RU"
+                )
+
+                .appendQueryParameter(
+                    "page_size",
+                    "10"
+                )
+
                 .build()
 
-            val connection = URL(requestUrl.toString())
-                .openConnection() as HttpURLConnection
+            val connection = URL(
+                requestUrl.toString()
+            ).openConnection() as HttpURLConnection
 
             try {
 
                 connection.requestMethod = "GET"
+
                 connection.connectTimeout = 20000
+
                 connection.readTimeout = 30000
 
                 connection.setRequestProperty(
@@ -1018,19 +1554,26 @@ class MainActivity : Activity() {
 
                 connection.connect()
 
-                val responseCode = connection.responseCode
+                val responseCode =
+                    connection.responseCode
 
-                val responseText = if (responseCode in 200..299) {
+                val responseText = if (
+                    responseCode in 200..299
+                ) {
 
-                    connection.inputStream.bufferedReader().use {
-                        it.readText()
-                    }
+                    connection.inputStream
+                        .bufferedReader()
+                        .use {
+                            it.readText()
+                        }
 
                 } else {
 
                     val error = connection.errorStream
                         ?.bufferedReader()
-                        ?.use { it.readText() } ?: ""
+                        ?.use {
+                            it.readText()
+                        } ?: ""
 
                     throw Exception(
                         "2ГИС HTTP $responseCode: ${error.take(500)}"
@@ -1041,12 +1584,19 @@ class MainActivity : Activity() {
 
                 val meta = json.optJSONObject("meta")
 
-                val apiCode = meta?.optInt("code", 200) ?: 200
+                val apiCode = meta?.optInt(
+                    "code",
+                    200
+                ) ?: 200
 
                 if (apiCode != 200) {
 
-                    val message = meta?.optJSONObject("error")
-                        ?.optString("message", "Неизвестная ошибка")
+                    val message = meta
+                        ?.optJSONObject("error")
+                        ?.optString(
+                            "message",
+                            "Неизвестная ошибка"
+                        )
                         ?: "Неизвестная ошибка"
 
                     throw Exception(
@@ -1054,105 +1604,145 @@ class MainActivity : Activity() {
                     )
                 }
 
-                val items = json.optJSONObject("result")
-                    ?.optJSONArray("items") ?: continue
+                val items = json
+                    .optJSONObject("result")
+                    ?.optJSONArray("items")
+                    ?: continue
 
                 for (i in 0 until items.length()) {
 
-                    val item = items.optJSONObject(i) ?: continue
-
-                    val point = item.optJSONObject("point")
+                    val item = items.optJSONObject(i)
                         ?: continue
 
-                    val longitude = point.optDouble("lon", Double.NaN)
-                    val latitude = point.optDouble("lat", Double.NaN)
+                    val coordinates = readCoordinates(item)
+                        ?: continue
 
-                    if (
-                        !longitude.isFinite() ||
-                        !latitude.isFinite() ||
-                        longitude !in -180.0..180.0 ||
-                        latitude !in -90.0..90.0
-                    ) continue
+                    val longitude = coordinates.first
+                    val latitude = coordinates.second
 
-                    val foundAddress = item.optString("full_name", "")
+                    val foundAddress = item.optString(
+                        "full_name",
+                        ""
+                    )
                         .ifBlank {
-                            item.optString("full_address_name", "")
+                            item.optString(
+                                "full_address_name",
+                                ""
+                            )
                         }
                         .ifBlank {
-                            item.optString("address_name", "")
+                            item.optString(
+                                "address_name",
+                                ""
+                            )
                         }
                         .ifBlank {
-                            item.optString("name", "")
+                            item.optString(
+                                "name",
+                                ""
+                            )
                         }
                         .trim()
 
                     if (foundAddress.isBlank()) continue
 
-                    val normalizedFound = normalizeAddress(foundAddress)
+                    val normalizedFound =
+                        normalizeAddress(foundAddress)
 
-                    val foundCity = detectCity(normalizedFound)
+                    val foundCity =
+                        detectCity(normalizedFound)
 
-                    if (foundCity != searchCity) continue
+                    if (
+                        foundCity != null &&
+                        foundCity != searchCity
+                    ) {
+                        continue
+                    }
 
                     val foundTokens = normalizedFound.split(
                         Regex("""[^а-яa-z0-9]+""")
                     )
 
-                    val matchedStreetTokens = streetTokens.count {
-                        foundTokens.contains(it)
-                    }
+                    val matchedStreetTokens =
+                        streetTokens.count {
+                            foundTokens.contains(it)
+                        }
 
-                    if (matchedStreetTokens == 0) continue
+                    if (matchedStreetTokens == 0) {
+                        continue
+                    }
 
                     val foundHouseNumbers =
                         extractHouseNumbers(foundAddress)
 
                     if (houseNumbers.isNotEmpty()) {
 
-                        val houseMatched = houseNumbers.any { requested ->
+                        val houseMatched =
+                            houseNumbers.any { requested ->
 
-                            foundHouseNumbers.any { actual ->
-                                actual == requested
+                                foundHouseNumbers.any { actual ->
+
+                                    actual == requested
+                                }
                             }
-                        }
 
-                        if (!houseMatched) continue
+                        if (!houseMatched) {
+                            continue
+                        }
                     }
 
-                    var score = matchedStreetTokens * 100
+                    var score =
+                        matchedStreetTokens * 100
 
                     if (houseNumbers.isNotEmpty()) {
+
                         score += 500
                     }
 
-                    if (item.optString("type") == "building") {
+                    if (
+                        item.optString("type") == "building"
+                    ) {
+
                         score += 50
                     }
 
                     if (foundCity == requestedCity) {
+
                         score += 100
                     }
 
                     candidates.add(
                         Candidate(
+
                             result = GeocodeResult(
+
                                 address = foundAddress,
+
                                 longitude = longitude,
+
                                 latitude = latitude,
-                                objectId = item.optString("id", "").trim()
+
+                                objectId = item.optString(
+                                    "id",
+                                    ""
+                                ).trim()
                             ),
+
                             score = score,
+
                             city = searchCity
                         )
                     )
                 }
 
             } finally {
+
                 connection.disconnect()
             }
         }
 
         if (candidates.isEmpty()) {
+
             return null
         }
 
@@ -1160,15 +1750,20 @@ class MainActivity : Activity() {
             it.score
         }
 
-        if (requestedCity == null && sorted.size > 1) {
+        if (
+            requestedCity == null &&
+            sorted.size > 1
+        ) {
 
             val first = sorted[0]
+
             val second = sorted[1]
 
             if (
                 first.score == second.score &&
                 first.city != second.city
             ) {
+
                 throw Exception(
                     "Неоднозначный адрес. Укажите город: $address"
                 )
@@ -1183,50 +1778,66 @@ class MainActivity : Activity() {
     private fun geocodeAddresses() {
 
         if (addresses.isEmpty()) {
+
             routeButton.isEnabled = false
+
             photoButton.isEnabled = true
+
             return
         }
 
         val addressCopy = addresses.toList()
 
         routeButton.isEnabled = false
+
         photoButton.isEnabled = false
 
         geocodedAddresses = emptyList()
+
         warehousePoint = null
 
         coordinatesText.text = ""
+
         status.text = "Подключение к 2ГИС..."
 
         executor.execute {
 
             val results = mutableListOf<GeocodeResult>()
+
             val notFound = mutableListOf<String>()
 
             var warehouseError: String? = null
+
             var foundWarehouse: GeocodeResult? = null
 
             try {
 
                 runOnUiThread {
-                    status.text = "Поиск координат склада..."
+
+                    status.text =
+                        "Поиск координат склада..."
                 }
 
-                foundWarehouse = geocodeAddress(warehouseAddress)
-                    ?: throw Exception(
-                        "Не удалось определить координаты склада"
-                    )
+                foundWarehouse =
+                    geocodeAddress(warehouseAddress)
+                        ?: throw Exception(
+                            "Не удалось определить координаты склада"
+                        )
 
             } catch (e: Exception) {
+
                 warehouseError = e.message
             }
 
             if (foundWarehouse != null) {
 
-                for ((index, address) in addressCopy.withIndex()) {
+                for (
+                    (index, address) in
+                    addressCopy.withIndex()
+                ) {
 
                     runOnUiThread {
+
                         status.text =
                             "Поиск адреса ${index + 1} из ${addressCopy.size}..."
                     }
@@ -1236,13 +1847,19 @@ class MainActivity : Activity() {
                         val result = geocodeAddress(address)
 
                         if (result != null) {
+
                             results.add(result)
+
                         } else {
+
                             notFound.add(address)
                         }
 
                     } catch (e: Exception) {
-                        notFound.add("$address (ошибка: ${e.message})")
+
+                        notFound.add(
+                            "$address (ошибка: ${e.message})"
+                        )
                     }
                 }
             }
@@ -1250,36 +1867,53 @@ class MainActivity : Activity() {
             runOnUiThread {
 
                 warehousePoint = foundWarehouse
+
                 geocodedAddresses = results.toList()
 
                 val output = StringBuilder()
 
-                output.append("СКЛАД — НАЧАЛО И КОНЕЦ МАРШРУТА\n")
+                output.append(
+                    "СКЛАД — НАЧАЛО И КОНЕЦ МАРШРУТА\n"
+                )
+
                 output.append(warehouseAddress)
+
                 output.append("\n\n")
 
                 output.append("НАЙДЕННЫЕ АДРЕСА: ")
+
                 output.append(results.size)
+
                 output.append("\n\n")
 
                 results.forEachIndexed { index, item ->
 
                     output.append("${index + 1}. ")
+
                     output.append(item.address)
+
                     output.append("\n")
 
                     output.append("Долгота: ")
+
                     output.append(item.longitude)
+
                     output.append("\n")
 
                     output.append("Широта: ")
+
                     output.append(item.latitude)
+
                     output.append("\n")
 
                     output.append("ID 2ГИС: ")
+
                     output.append(
-                        item.objectId.ifBlank { "не предоставлен API" }
+                        item.objectId.ifBlank {
+                            "не предоставлен API"
+                        }
                     )
+
                     output.append("\n\n")
                 }
 
@@ -1290,35 +1924,44 @@ class MainActivity : Activity() {
                     )
 
                     notFound.forEachIndexed { index, address ->
-                        output.append("${index + 1}. $address\n")
+
+                        output.append(
+                            "${index + 1}. $address\n"
+                        )
                     }
                 }
 
-                coordinatesText.text = output.toString()
+                coordinatesText.text =
+                    output.toString()
 
                 status.text = when {
 
                     warehouseError != null ->
+
                         "Ошибка определения склада: $warehouseError"
 
                     results.size > 10 ->
+
                         "Найдено ${results.size}. Максимум 10 адресов доставки"
 
                     notFound.isNotEmpty() ->
+
                         "Найдено: ${results.size}, не найдено: ${notFound.size}. Проверьте адреса"
 
                     results.size == addressCopy.size ->
+
                         "Все адреса найдены. Маршрут готов к открытию в 2ГИС"
 
                     else ->
+
                         "Не удалось подготовить маршрут"
                 }
 
                 routeButton.isEnabled =
                     foundWarehouse != null &&
-                    results.size == addressCopy.size &&
-                    results.isNotEmpty() &&
-                    results.size <= 10
+                        results.size == addressCopy.size &&
+                        results.isNotEmpty() &&
+                        results.size <= 10
 
                 photoButton.isEnabled = true
             }
@@ -1332,39 +1975,55 @@ class MainActivity : Activity() {
         val warehouse = warehousePoint
 
         if (warehouse == null) {
+
             Toast.makeText(
                 this,
                 "Не удалось определить координаты склада",
                 Toast.LENGTH_LONG
             ).show()
+
             return
         }
 
         if (geocodedAddresses.isEmpty()) {
+
             Toast.makeText(
                 this,
                 "Нет найденных адресов",
                 Toast.LENGTH_LONG
             ).show()
+
             return
         }
 
         if (geocodedAddresses.size > 10) {
+
             Toast.makeText(
                 this,
                 "Максимум 10 адресов доставки",
                 Toast.LENGTH_LONG
             ).show()
+
             return
         }
 
-        val points = buildList {
-            add(warehouse)
-            addAll(geocodedAddresses)
-            add(warehouse)
-        }
+        val points = mutableListOf<GeocodeResult>()
 
-        val pointsPath = points.joinToString("|") { point ->
+        // Начало маршрута — склад
+
+        points.add(warehouse)
+
+        // Все адреса доставки
+
+        points.addAll(geocodedAddresses)
+
+        // Конец маршрута — тот же склад
+
+        points.add(warehouse)
+
+        val pointsPath = points.joinToString("|") {
+
+            point ->
 
             String.format(
                 Locale.US,
@@ -1381,18 +2040,26 @@ class MainActivity : Activity() {
 
             val routeUri = Uri.parse(routeUrl)
 
+            // Сначала пробуем открыть приложение 2ГИС
+
             val dgIsIntent = Intent(
                 Intent.ACTION_VIEW,
                 routeUri
             ).apply {
-                setPackage("ru.dublgis.dgismobile")
+
+                setPackage(
+                    "ru.dublgis.dgismobile"
+                )
             }
 
             try {
 
                 startActivity(dgIsIntent)
 
-            } catch (e: Exception) {
+            } catch (e: ActivityNotFoundException) {
+
+                // Если приложение не установлено,
+                // открываем маршрут через браузер.
 
                 startActivity(
                     Intent(
@@ -1404,7 +2071,8 @@ class MainActivity : Activity() {
 
         } catch (e: Exception) {
 
-            status.text = "Не удалось открыть маршрут: ${e.message}"
+            status.text =
+                "Не удалось открыть маршрут: ${e.message}"
 
             Toast.makeText(
                 this,
@@ -1419,6 +2087,7 @@ class MainActivity : Activity() {
     private fun recognizePhoto(file: File) {
 
         photoButton.isEnabled = false
+
         routeButton.isEnabled = false
 
         invalidateRouteData()
@@ -1428,44 +2097,65 @@ class MainActivity : Activity() {
         executor.execute {
 
             var original: Bitmap? = null
+
             var gray: Bitmap? = null
+
             var binary: Bitmap? = null
+
             var tess: TessBaseAPI? = null
 
             try {
 
-                val directory = File(filesDir, "tesseract")
+                val directory = File(
+                    filesDir,
+                    "tesseract"
+                )
+
                 directory.mkdirs()
 
                 runOnUiThread {
-                    status.text = "Загрузка русского языка..."
+
+                    status.text =
+                        "Загрузка русского языка..."
                 }
 
                 downloadRussianLanguage(directory)
 
                 runOnUiThread {
-                    status.text = "Обработка фотографии..."
+
+                    status.text =
+                        "Обработка фотографии..."
                 }
 
                 original = loadOrientedBitmap(file)
 
-                val processed = createProcessedImages(original)
+                val processed = createProcessedImages(
+                    original
+                )
 
                 gray = processed.first
+
                 binary = processed.second
 
                 runOnUiThread {
-                    status.text = "Распознавание адресов..."
+
+                    status.text =
+                        "Распознавание адресов..."
                 }
 
                 tess = TessBaseAPI()
 
-                if (!tess.init(
-                    directory.absolutePath,
-                    "rus",
-                    TessBaseAPI.OEM_LSTM_ONLY
-                )) {
-                    throw Exception("Не удалось запустить Tesseract")
+                if (
+                    !tess.init(
+                        directory.absolutePath,
+                        "rus",
+                        TessBaseAPI.OEM_LSTM_ONLY
+                    )
+                ) {
+
+                    throw Exception(
+                        "Не удалось запустить Tesseract"
+                    )
                 }
 
                 tess.setVariable(
@@ -1480,10 +2170,15 @@ class MainActivity : Activity() {
 
                 val recognizedText = recognizeVariants(
                     tess,
-                    listOf(original, gray, binary)
+                    listOf(
+                        original,
+                        gray,
+                        binary
+                    )
                 )
 
-                val foundAddresses = extractAddresses(recognizedText)
+                val foundAddresses =
+                    extractAddresses(recognizedText)
 
                 runOnUiThread {
 
@@ -1491,7 +2186,9 @@ class MainActivity : Activity() {
 
                     if (foundAddresses.isEmpty()) {
 
-                        status.text = "Адреса не найдены"
+                        status.text =
+                            "Адреса не найдены. Попробуйте другое фото."
+
                         photoButton.isEnabled = true
 
                     } else {
@@ -1506,16 +2203,23 @@ class MainActivity : Activity() {
             } catch (e: Exception) {
 
                 runOnUiThread {
-                    status.text = "Ошибка: ${e.message}"
+
+                    status.text =
+                        "Ошибка: ${e.javaClass.simpleName}: ${e.message}"
+
                     photoButton.isEnabled = true
+
                     routeButton.isEnabled = false
                 }
 
             } finally {
 
                 tess?.recycle()
+
                 original?.recycle()
+
                 gray?.recycle()
+
                 binary?.recycle()
             }
         }
@@ -1524,7 +2228,9 @@ class MainActivity : Activity() {
     // ЗАКРЫТИЕ ПРИЛОЖЕНИЯ
 
     override fun onDestroy() {
+
         executor.shutdown()
+
         super.onDestroy()
     }
 }
