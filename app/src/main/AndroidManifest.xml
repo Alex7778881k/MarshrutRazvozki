@@ -1,16 +1,27 @@
+
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Доступ к интернету для работы с API 2ГИС -->
+    <!-- Интернет для API 2ГИС и загрузки русского языка Tesseract -->
     <uses-permission android:name="android.permission.INTERNET" />
 
-    <application
-        android:allowBackup="false"
-        android:label="Маршрут развозки"
-        android:supportsRtl="true"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+    <!-- Камера -->
+    <uses-permission android:name="android.permission.CAMERA" />
 
-        <!-- Передача фотографии в приложение камеры -->
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="Маршрут развозки"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:usesCleartextTraffic="false">
+
+        <!-- Доступ к камере и сохранение фотографий -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -25,7 +36,7 @@
 
         <!-- Главный экран приложения -->
         <activity
-            android:name="ru.marshrut.razvozki.MainActivity"
+            android:name=".MainActivity"
             android:exported="true">
 
             <intent-filter>
