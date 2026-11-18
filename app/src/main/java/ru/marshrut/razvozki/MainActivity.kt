@@ -1,4 +1,3 @@
-
 package ru.marshrut.razvozki
 
 import android.app.Activity
@@ -55,7 +54,21 @@ class MainActivity : Activity() {
     data class GeocodeResult(
         val address: String,
         val longitude: Double,
-        val latitude: Double
+        val latitude: Double,
+        val objectId: String = ""
+    )
+
+    private val cities = listOf(
+        "набережные челны",
+        "нижнекамск",
+        "казань",
+        "елабуга",
+        "менделеевск",
+        "мамадыш",
+        "заинск",
+        "альметьевск",
+        "ижевск",
+        "москва"
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -104,7 +117,6 @@ class MainActivity : Activity() {
         }
 
         coordinatesText = TextView(this).apply {
-            text = ""
             textSize = 14f
             setPadding(0, 12, 0, 12)
         }
@@ -162,7 +174,6 @@ class MainActivity : Activity() {
             val intent = Intent(
                 android.provider.MediaStore.ACTION_IMAGE_CAPTURE
             ).apply {
-
                 putExtra(
                     android.provider.MediaStore.EXTRA_OUTPUT,
                     photoUri
@@ -182,6 +193,7 @@ class MainActivity : Activity() {
                 throw Exception("Камера не найдена")
             }
 
+            photoButton.isEnabled = false
             startActivityForResult(intent, cameraRequest)
 
         } catch (e: Exception) {
@@ -218,7 +230,7 @@ class MainActivity : Activity() {
         }
     }
 
-    // ЗАГРУЗКА РУССКОГО ЯЗЫКА TESSERACT
+    // ЗАГРУЗКА РУССКОГО TESSERACT
 
     private fun downloadRussianLanguage(directory: File) {
 
@@ -358,7 +370,7 @@ class MainActivity : Activity() {
         return bitmap
     }
 
-    // ОБРАБОТКА ИЗОБРАЖЕНИЯ
+    // ОБРАБОТКА ФОТОГРАФИИ
 
     private fun createProcessedImages(
         source: Bitmap
@@ -542,7 +554,7 @@ class MainActivity : Activity() {
         return bestText
     }
 
-    // ВЫДЕЛЕНИЕ АДРЕСОВ ИЗ ТЕКСТА
+    // ВЫДЕЛЕНИЕ АДРЕСОВ
 
     private fun extractAddresses(text: String): List<String> {
 
@@ -607,22 +619,8 @@ class MainActivity : Activity() {
         }
 
         fun hasCity(line: String): Boolean {
-
             val value = normalized(line)
-
-            return listOf(
-                "набережные челны",
-                "нижнекамск",
-                "казань",
-                "елабуга",
-                "менделеевск",
-                "мамадыш",
-                "заинск",
-                "альметьевск",
-                "ижевск",
-                "москву",
-                "москва"
-            ).any { value.contains(it) }
+            return cities.any { value.contains(it) }
         }
 
         fun isAddress(line: String): Boolean {
@@ -660,14 +658,12 @@ class MainActivity : Activity() {
                 pendingHasCity && pendingHasNumber
 
             if (pendingComplete) {
-
                 combinedLines.add(pending)
                 pending = line
                 continue
             }
 
             if (pendingHasStreet && currentHasStreet) {
-
                 combinedLines.add(pending)
                 pending = line
                 continue
@@ -676,16 +672,12 @@ class MainActivity : Activity() {
             val canJoin =
                 pendingHasCity && currentHasStreet ||
                 pendingHasStreet && currentHasNumber ||
-                pendingHasStreet && currentHasStreet ||
                 pendingHasCity && currentHasNumber ||
                 hasWord(pending, addressWords) && currentHasNumber
 
             if (canJoin && pending.length + line.length < 180) {
-
                 pending = "$pending, $line"
-
             } else {
-
                 combinedLines.add(pending)
                 pending = line
             }
@@ -718,14 +710,11 @@ class MainActivity : Activity() {
         }
 
         return found.distinctBy {
-            normalized(it).replace(
-                Regex("""[\s.,]+"""),
-                ""
-            )
+            normalized(it).replace(Regex("""[\s.,]+"""), "")
         }
     }
 
-    // СБРОС СТАРЫХ КООРДИНАТ
+    // СБРОС КООРДИНАТ
 
     private fun invalidateRouteData() {
 
@@ -820,7 +809,6 @@ class MainActivity : Activity() {
             )
 
             row.addView(delete)
-
             addressesContainer.addView(row)
 
             edit.setOnFocusChangeListener { _, hasFocus ->
@@ -886,7 +874,50 @@ class MainActivity : Activity() {
         showAddresses(addresses.toList())
     }
 
-    // НОВЫЙ ПОИСК КООРДИНАТ ЧЕРЕЗ API 2ГИС
+    // НОРМАЛИЗАЦИЯ АДРЕСА
+
+    private fun normalizeAddress(value: String): String {
+
+        return value
+            .lowercase(Locale("ru"))
+            .replace("ё", "е")
+            .replace(Regex("""[.,;:]"""), " ")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+    }
+
+    // ОПРЕДЕЛЕНИЕ ГОРОДА
+
+    private fun detectCity(address: String): String? {
+
+        val value = normalizeAddress(address)
+
+        return cities.firstOrNull {
+            value.contains(it)
+        }
+    }
+
+    // ВЫДЕЛЕНИЕ НОМЕРА ДОМА
+
+    private fun extractHouseNumbers(address: String): Set<String> {
+
+        val pattern = Regex(
+            """(?i)(?:\bд\.?\s*)?(\d{1,5}\s*(?:[/\-]\s*\d{1,5})?\s*[а-яa-z]?)"""
+        )
+
+        return pattern.findAll(address)
+            .mapNotNull { match ->
+
+                match.groupValues[1]
+                    .lowercase(Locale("ru"))
+                    .replace(Regex("""\s+"""), "")
+                    .replace("-", "/")
+                    .takeIf { it.isNotBlank() }
+            }
+            .toSet()
+    }
+
+    // ГЕОКОДИРОВАНИЕ ЧЕРЕЗ API 2ГИС
 
     private fun geocodeAddress(address: String): GeocodeResult? {
 
@@ -896,19 +927,11 @@ class MainActivity : Activity() {
             throw Exception("Не найден ключ DGIS_API_KEY")
         }
 
-        fun normalize(value: String): String {
-            return value.lowercase(Locale("ru"))
-                .replace("ё", "е")
-                .replace(Regex("""[.,;:]"""), " ")
-                .replace(Regex("""\s+"""), " ")
-                .trim()
-        }
-
-        // Убираем почтовый индекс и лишние административные слова
         val cleanedAddress = address
             .replace(Regex("""\b\d{6}\b"""), " ")
             .replace(Regex("""(?i)\bроссия\b"""), " ")
             .replace(Regex("""(?i)\bреспублика\b"""), " ")
+            .replace(Regex("""(?i)\bтатарстан\b"""), " ")
             .replace(Regex("""(?i)\bцентральный район\b"""), " ")
             .replace(Regex("""\s+"""), " ")
             .trim()
@@ -918,50 +941,11 @@ class MainActivity : Activity() {
             throw Exception("Пустой адрес")
         }
 
-        val input = normalize(cleanedAddress)
+        val input = normalizeAddress(cleanedAddress)
 
-        val cities = listOf(
-            "набережные челны",
-            "нижнекамск",
-            "казань",
-            "елабуга",
-            "менделеевск",
-            "мамадыш",
-            "заинск",
-            "альметьевск",
-            "ижевск",
-            "москва"
-        )
+        val requestedCity = detectCity(input)
 
-        val city = cities.firstOrNull {
-            input.contains(it)
-        }
-
-        val queries = linkedSetOf<String>()
-
-        queries.add(cleanedAddress)
-
-        if (city == null) {
-            queries.add("$cleanedAddress, Набережные Челны")
-            queries.add("$cleanedAddress, Нижнекамск")
-            queries.add("$cleanedAddress, Елабуга")
-            queries.add("$cleanedAddress, Менделеевск")
-            queries.add("$cleanedAddress, Казань")
-        }
-
-        // Выделяем номера домов
-        val houseRegex = Regex(
-            """\b\d{1,5}(?:\s*[/\-]\s*\d{1,5})?\s*[а-яa-z]?\b""",
-            RegexOption.IGNORE_CASE
-        )
-
-        val houseNumbers = houseRegex.findAll(cleanedAddress)
-            .map {
-                it.value.lowercase(Locale("ru"))
-                    .replace(Regex("""\s+"""), "")
-                    .replace("-", "/")
-            }
-            .toSet()
+        val houseNumbers = extractHouseNumbers(cleanedAddress)
 
         val excludedWords = setOf(
             "улица", "ул", "проезд", "пр", "проспект",
@@ -970,8 +954,9 @@ class MainActivity : Activity() {
             "площадь", "пл", "микрорайон", "мкр",
             "дом", "д", "корпус", "корп", "строение",
             "стр", "квартира", "кв", "россия",
-            "республика", "татарстан", "набережные",
-            "челны", "нижнекамск", "казань", "елабуга",
+            "республика", "татарстан",
+            "набережные", "челны",
+            "нижнекамск", "казань", "елабуга",
             "менделеевск", "мамадыш", "заинск",
             "альметьевск", "ижевск", "москва",
             "центральный", "район", "индекс"
@@ -989,10 +974,28 @@ class MainActivity : Activity() {
             throw Exception("Не удалось определить улицу: $address")
         }
 
-        var best: GeocodeResult? = null
-        var bestScore = Int.MIN_VALUE
+        val searchCities = if (requestedCity != null) {
+            listOf(requestedCity)
+        } else {
+            cities
+        }
 
-        for (searchText in queries) {
+        data class Candidate(
+            val result: GeocodeResult,
+            val score: Int,
+            val city: String
+        )
+
+        val candidates = mutableListOf<Candidate>()
+
+        val houseRegex = Regex(
+            """\d{1,5}\s*(?:[/\-]\s*\d{1,5})?\s*[а-яa-z]?""",
+            RegexOption.IGNORE_CASE
+        )
+
+        for (searchCity in searchCities) {
+
+            val searchText = "$cleanedAddress, $searchCity"
 
             val requestUrl = Uri.parse(
                 "https://catalog.api.2gis.com/3.0/items/geocode"
@@ -1002,9 +1005,9 @@ class MainActivity : Activity() {
                 .appendQueryParameter("locale", "ru_RU")
                 .appendQueryParameter(
                     "fields",
-                    "items.point,items.full_address_name,items.address"
+                    "items.id,items.point,items.full_address_name,items.address"
                 )
-                .appendQueryParameter("page_size", "10")
+                .appendQueryParameter("page_size", "20")
                 .build()
 
             val connection = URL(requestUrl.toString())
@@ -1080,26 +1083,17 @@ class MainActivity : Activity() {
 
                     if (foundAddress.isBlank()) continue
 
-                    val found = normalize(foundAddress)
+                    val normalizedFound = normalizeAddress(foundAddress)
 
-                    val foundHouseNumbers = houseRegex.findAll(foundAddress)
-                        .map {
-                            it.value.lowercase(Locale("ru"))
-                                .replace(Regex("""\s+"""), "")
-                                .replace("-", "/")
-                        }
-                        .toSet()
+                    // Проверяем город
 
-                    val houseMatched = houseNumbers.isEmpty() ||
-                        houseNumbers.any { requested ->
-                            foundHouseNumbers.any { actual ->
-                                actual == requested
-                            }
-                        }
+                    val foundCity = detectCity(normalizedFound)
 
-                    if (!houseMatched) continue
+                    if (foundCity != searchCity) continue
 
-                    val foundTokens = found.split(
+                    // Проверяем улицу
+
+                    val foundTokens = normalizedFound.split(
                         Regex("""[^а-яa-z0-9]+""")
                     )
 
@@ -1109,30 +1103,50 @@ class MainActivity : Activity() {
 
                     if (matchedStreetTokens == 0) continue
 
-                    var score = matchedStreetTokens * 20
+                    // Проверяем номер дома
 
-                    if (houseMatched && houseNumbers.isNotEmpty()) {
-                        score += 200
+                    val foundHouseNumbers = extractHouseNumbers(foundAddress)
+
+                    if (houseNumbers.isNotEmpty()) {
+
+                        val houseMatched = houseNumbers.any { requested ->
+
+                            foundHouseNumbers.any { actual ->
+                                actual == requested
+                            }
+                        }
+
+                        if (!houseMatched) continue
                     }
 
-                    if (city != null && found.contains(city)) {
-                        score += 50
+                    var score = matchedStreetTokens * 100
+
+                    if (houseNumbers.isNotEmpty()) {
+                        score += 500
                     }
 
                     if (item.optString("type") == "building") {
-                        score += 30
+                        score += 50
                     }
 
-                    if (score > bestScore) {
+                    if (foundCity == requestedCity) {
+                        score += 100
+                    }
 
-                        bestScore = score
+                    val objectId = item.optString("id", "").trim()
 
-                        best = GeocodeResult(
-                            address = foundAddress,
-                            longitude = longitude,
-                            latitude = latitude
+                    candidates.add(
+                        Candidate(
+                            result = GeocodeResult(
+                                address = foundAddress,
+                                longitude = longitude,
+                                latitude = latitude,
+                                objectId = objectId
+                            ),
+                            score = score,
+                            city = searchCity
                         )
-                    }
+                    )
                 }
 
             } finally {
@@ -1140,10 +1154,38 @@ class MainActivity : Activity() {
             }
         }
 
-        return best
+        if (candidates.isEmpty()) {
+            return null
+        }
+
+        // Выбираем наиболее точное совпадение
+
+        val sorted = candidates.sortedByDescending {
+            it.score
+        }
+
+        // Если город не указан и два города дали одинаковое
+        // совпадение, не выбираем случайный адрес.
+
+        if (requestedCity == null && sorted.size > 1) {
+
+            val first = sorted[0]
+            val second = sorted[1]
+
+            if (
+                first.score == second.score &&
+                first.city != second.city
+            ) {
+                throw Exception(
+                    "Неоднозначный адрес. Укажите город: $address"
+                )
+            }
+        }
+
+        return sorted.first().result
     }
 
-    // АВТОМАТИЧЕСКИЙ ПОИСК ВСЕХ КООРДИНАТ
+    // АВТОМАТИЧЕСКИЙ ПОИСК КООРДИНАТ
 
     private fun geocodeAddresses() {
 
@@ -1239,6 +1281,12 @@ class MainActivity : Activity() {
 
                     output.append("Широта: ")
                     output.append(item.latitude)
+                    output.append("\n")
+
+                    output.append("ID 2ГИС: ")
+                    output.append(
+                        item.objectId.ifBlank { "не предоставлен API" }
+                    )
                     output.append("\n\n")
                 }
 
@@ -1261,7 +1309,7 @@ class MainActivity : Activity() {
                         "Ошибка определения склада: $warehouseError"
 
                     results.size > 10 ->
-                        "Найдено ${results.size}. Максимум 10 адресов доставки в одном маршруте"
+                        "Найдено ${results.size}. Максимум 10 адресов доставки"
 
                     notFound.isNotEmpty() ->
                         "Найдено: ${results.size}, не найдено: ${notFound.size}. Проверьте адреса"
@@ -1284,7 +1332,7 @@ class MainActivity : Activity() {
         }
     }
 
-    // ОТКРЫТИЕ МАРШРУТА В 2ГИС
+    // ПОСТРОЕНИЕ И ОТКРЫТИЕ МАРШРУТА В 2ГИС
 
     private fun openRouteIn2Gis() {
 
@@ -1302,7 +1350,7 @@ class MainActivity : Activity() {
         if (geocodedAddresses.isEmpty()) {
             Toast.makeText(
                 this,
-                "Нет найденных адресов для маршрута",
+                "Нет найденных адресов",
                 Toast.LENGTH_LONG
             ).show()
             return
@@ -1311,7 +1359,7 @@ class MainActivity : Activity() {
         if (geocodedAddresses.size > 10) {
             Toast.makeText(
                 this,
-                "Для одного маршрута можно передать не более 10 адресов доставки",
+                "Максимум 10 адресов доставки",
                 Toast.LENGTH_LONG
             ).show()
             return
@@ -1325,12 +1373,18 @@ class MainActivity : Activity() {
 
         val pointsPath = points.joinToString("|") { point ->
 
-            String.format(
+            val coordinates = String.format(
                 Locale.US,
                 "%.6f,%.6f",
                 point.longitude,
                 point.latitude
             )
+
+            if (point.objectId.isNotBlank()) {
+                "$coordinates;${point.objectId}"
+            } else {
+                coordinates
+            }
         }
 
         val routeUrl =
@@ -1339,6 +1393,8 @@ class MainActivity : Activity() {
         try {
 
             val routeUri = Uri.parse(routeUrl)
+
+            // Сначала пробуем открыть непосредственно приложение 2ГИС
 
             val dgIsIntent = Intent(
                 Intent.ACTION_VIEW,
@@ -1351,10 +1407,16 @@ class MainActivity : Activity() {
 
                 startActivity(dgIsIntent)
 
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+
+                // Если приложение не установлено,
+                // открываем ссылку в браузере
 
                 startActivity(
-                    Intent(Intent.ACTION_VIEW, routeUri)
+                    Intent(
+                        Intent.ACTION_VIEW,
+                        routeUri
+                    )
                 )
             }
 
@@ -1364,7 +1426,7 @@ class MainActivity : Activity() {
 
             Toast.makeText(
                 this,
-                "Не удалось передать маршрут в 2ГИС",
+                "Ошибка передачи маршрута в 2ГИС",
                 Toast.LENGTH_LONG
             ).show()
         }
@@ -1453,7 +1515,7 @@ class MainActivity : Activity() {
                     } else {
 
                         status.text =
-                            "Адреса распознаны. Автоматический поиск координат..."
+                            "Адреса распознаны. Поиск координат..."
 
                         geocodeAddresses()
                     }
