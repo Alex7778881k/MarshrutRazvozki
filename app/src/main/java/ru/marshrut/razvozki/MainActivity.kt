@@ -1,3 +1,4 @@
+
 package ru.marshrut.razvozki
 
 import android.app.Activity
@@ -917,7 +918,7 @@ class MainActivity : Activity() {
             .toSet()
     }
 
-    // ГЕОКОДИРОВАНИЕ ЧЕРЕЗ API 2ГИС
+    // ГЕОКОДИРОВАНИЕ ЧЕРЕЗ API 2ГИС 3.0
 
     private fun geocodeAddress(address: String): GeocodeResult? {
 
@@ -941,10 +942,7 @@ class MainActivity : Activity() {
             throw Exception("Пустой адрес")
         }
 
-        val input = normalizeAddress(cleanedAddress)
-
-        val requestedCity = detectCity(input)
-
+        val requestedCity = detectCity(cleanedAddress)
         val houseNumbers = extractHouseNumbers(cleanedAddress)
 
         val excludedWords = setOf(
@@ -962,11 +960,10 @@ class MainActivity : Activity() {
             "центральный", "район", "индекс"
         )
 
-        val streetTokens = input
+        val streetTokens = normalizeAddress(cleanedAddress)
             .split(Regex("""[^а-яa-z]+"""))
             .filter {
-                it.length >= 3 &&
-                    it !in excludedWords
+                it.length >= 3 && it !in excludedWords
             }
             .distinct()
 
@@ -988,11 +985,6 @@ class MainActivity : Activity() {
 
         val candidates = mutableListOf<Candidate>()
 
-        val houseRegex = Regex(
-            """\d{1,5}\s*(?:[/\-]\s*\d{1,5})?\s*[а-яa-z]?""",
-            RegexOption.IGNORE_CASE
-        )
-
         for (searchCity in searchCities) {
 
             val searchText = "$cleanedAddress, $searchCity"
@@ -1005,9 +997,9 @@ class MainActivity : Activity() {
                 .appendQueryParameter("locale", "ru_RU")
                 .appendQueryParameter(
                     "fields",
-                    "items.id,items.point,items.full_address_name,items.address"
+                    "items.point,items.geometry.centroid"
                 )
-                .appendQueryParameter("page_size", "20")
+                .appendQueryParameter("page_size", "10")
                 .build()
 
             val connection = URL(requestUrl.toString())
@@ -1041,17 +1033,25 @@ class MainActivity : Activity() {
                         ?.use { it.readText() } ?: ""
 
                     throw Exception(
-                        "2ГИС HTTP $responseCode: ${error.take(200)}"
+                        "2ГИС HTTP $responseCode: ${error.take(500)}"
                     )
                 }
 
                 val json = JSONObject(responseText)
 
-                val apiCode = json.optJSONObject("meta")
-                    ?.optInt("code", 200) ?: 200
+                val meta = json.optJSONObject("meta")
+
+                val apiCode = meta?.optInt("code", 200) ?: 200
 
                 if (apiCode != 200) {
-                    throw Exception("Ошибка API 2ГИС: $apiCode")
+
+                    val message = meta?.optJSONObject("error")
+                        ?.optString("message", "Неизвестная ошибка")
+                        ?: "Неизвестная ошибка"
+
+                    throw Exception(
+                        "Ошибка API 2ГИС: $message (код $apiCode)"
+                    )
                 }
 
                 val items = json.optJSONObject("result")
@@ -1061,7 +1061,8 @@ class MainActivity : Activity() {
 
                     val item = items.optJSONObject(i) ?: continue
 
-                    val point = item.optJSONObject("point") ?: continue
+                    val point = item.optJSONObject("point")
+                        ?: continue
 
                     val longitude = point.optDouble("lon", Double.NaN)
                     val latitude = point.optDouble("lat", Double.NaN)
@@ -1073,25 +1074,25 @@ class MainActivity : Activity() {
                         latitude !in -90.0..90.0
                     ) continue
 
-                    val foundAddress = item.optString(
-                        "full_address_name",
-                        ""
-                    ).ifBlank {
-                        item.optJSONObject("address")
-                            ?.optString("name", "") ?: ""
-                    }.trim()
+                    val foundAddress = item.optString("full_name", "")
+                        .ifBlank {
+                            item.optString("full_address_name", "")
+                        }
+                        .ifBlank {
+                            item.optString("address_name", "")
+                        }
+                        .ifBlank {
+                            item.optString("name", "")
+                        }
+                        .trim()
 
                     if (foundAddress.isBlank()) continue
 
                     val normalizedFound = normalizeAddress(foundAddress)
 
-                    // Проверяем город
-
                     val foundCity = detectCity(normalizedFound)
 
                     if (foundCity != searchCity) continue
-
-                    // Проверяем улицу
 
                     val foundTokens = normalizedFound.split(
                         Regex("""[^а-яa-z0-9]+""")
@@ -1103,9 +1104,8 @@ class MainActivity : Activity() {
 
                     if (matchedStreetTokens == 0) continue
 
-                    // Проверяем номер дома
-
-                    val foundHouseNumbers = extractHouseNumbers(foundAddress)
+                    val foundHouseNumbers =
+                        extractHouseNumbers(foundAddress)
 
                     if (houseNumbers.isNotEmpty()) {
 
@@ -1133,15 +1133,13 @@ class MainActivity : Activity() {
                         score += 100
                     }
 
-                    val objectId = item.optString("id", "").trim()
-
                     candidates.add(
                         Candidate(
                             result = GeocodeResult(
                                 address = foundAddress,
                                 longitude = longitude,
                                 latitude = latitude,
-                                objectId = objectId
+                                objectId = item.optString("id", "").trim()
                             ),
                             score = score,
                             city = searchCity
@@ -1158,14 +1156,9 @@ class MainActivity : Activity() {
             return null
         }
 
-        // Выбираем наиболее точное совпадение
-
         val sorted = candidates.sortedByDescending {
             it.score
         }
-
-        // Если город не указан и два города дали одинаковое
-        // совпадение, не выбираем случайный адрес.
 
         if (requestedCity == null && sorted.size > 1) {
 
@@ -1373,18 +1366,12 @@ class MainActivity : Activity() {
 
         val pointsPath = points.joinToString("|") { point ->
 
-            val coordinates = String.format(
+            String.format(
                 Locale.US,
                 "%.6f,%.6f",
                 point.longitude,
                 point.latitude
             )
-
-            if (point.objectId.isNotBlank()) {
-                "$coordinates;${point.objectId}"
-            } else {
-                coordinates
-            }
         }
 
         val routeUrl =
@@ -1393,8 +1380,6 @@ class MainActivity : Activity() {
         try {
 
             val routeUri = Uri.parse(routeUrl)
-
-            // Сначала пробуем открыть непосредственно приложение 2ГИС
 
             val dgIsIntent = Intent(
                 Intent.ACTION_VIEW,
@@ -1408,9 +1393,6 @@ class MainActivity : Activity() {
                 startActivity(dgIsIntent)
 
             } catch (e: Exception) {
-
-                // Если приложение не установлено,
-                // открываем ссылку в браузере
 
                 startActivity(
                     Intent(
