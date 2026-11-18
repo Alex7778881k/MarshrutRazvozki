@@ -12,6 +12,7 @@
         <intent>
             <action android:name="android.media.action.IMAGE_CAPTURE" />
         </intent>
+
         <package android:name="ru.dublgis.dgismobile" />
     </queries>
 
@@ -46,4 +47,5 @@
         </activity>
 
     </application>
+
 </manifest>
