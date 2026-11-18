@@ -1,4 +1,3 @@
-
 package ru.marshrut.razvozki
 
 import android.app.Activity
@@ -35,10 +34,13 @@ class MainActivity : Activity() {
     private lateinit var addressesContainer: LinearLayout
     private lateinit var photoButton: Button
     private lateinit var geocodeButton: Button
+    private lateinit var routeButton: Button
     private lateinit var countText: TextView
     private lateinit var coordinatesText: TextView
 
     private val addresses = mutableListOf<String>()
+    private var geocodedAddresses: List<GeocodeResult> = emptyList()
+    private var warehousePoint: GeocodeResult? = null
 
     private var photoUri: Uri? = null
     private var photoFile: File? = null
@@ -102,6 +104,14 @@ class MainActivity : Activity() {
             }
         }
 
+        routeButton = Button(this).apply {
+            text = "ПОСТРОИТЬ МАРШРУТ В 2ГИС"
+            isEnabled = false
+            setOnClickListener {
+                openRouteIn2Gis()
+            }
+        }
+
         coordinatesText = TextView(this).apply {
             text = ""
             textSize = 14f
@@ -127,6 +137,7 @@ class MainActivity : Activity() {
         )
 
         layout.addView(geocodeButton)
+        layout.addView(routeButton)
 
         layout.addView(
             resultScroll,
@@ -696,10 +707,24 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun invalidateRouteData() {
+        geocodedAddresses = emptyList()
+        warehousePoint = null
+
+        if (::routeButton.isInitialized) {
+            routeButton.isEnabled = false
+        }
+
+        if (::coordinatesText.isInitialized) {
+            coordinatesText.text = ""
+        }
+    }
+
     private fun showAddresses(found: List<String>) {
 
         addresses.clear()
         addresses.addAll(found)
+        invalidateRouteData()
 
         addressesContainer.removeAllViews()
         coordinatesText.text = ""
@@ -746,9 +771,11 @@ class MainActivity : Activity() {
 
                 setOnClickListener {
                     saveEditedAddresses()
+
                     if (index < addresses.size) {
                         addresses.removeAt(index)
                     }
+
                     renderAddresses()
                 }
             }
@@ -771,7 +798,12 @@ class MainActivity : Activity() {
             edit.setOnFocusChangeListener { _, hasFocus ->
 
                 if (!hasFocus && index < addresses.size) {
-                    addresses[index] = edit.text.toString().trim()
+                    val updatedAddress = edit.text.toString().trim()
+
+                    if (addresses[index] != updatedAddress) {
+                        addresses[index] = updatedAddress
+                        invalidateRouteData()
+                    }
                 }
             }
         }
@@ -850,6 +882,7 @@ class MainActivity : Activity() {
             connection.requestMethod = "GET"
             connection.connectTimeout = 20000
             connection.readTimeout = 30000
+
             connection.setRequestProperty(
                 "Accept",
                 "application/json"
@@ -943,6 +976,77 @@ class MainActivity : Activity() {
         }
     }
 
+    // ПОСТРОЕНИЕ МАРШРУТА В 2ГИС
+
+    private fun openRouteIn2Gis() {
+
+        val warehouse = warehousePoint
+
+        if (warehouse == null) {
+            Toast.makeText(
+                this,
+                "Сначала найдите координаты склада",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
+        if (geocodedAddresses.isEmpty()) {
+            Toast.makeText(
+                this,
+                "Нет найденных адресов для маршрута",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
+        if (geocodedAddresses.size > 10) {
+            Toast.makeText(
+                this,
+                "Слишком много адресов для одной ссылки 2ГИС",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
+        val points = buildList {
+            add(warehouse)
+            addAll(geocodedAddresses)
+            add(warehouse)
+        }
+
+        val pointsPath = points.joinToString("|") { point ->
+            "${point.longitude},${point.latitude}"
+        }
+
+        val routeUrl =
+            "https://2gis.ru/directions/tab/car/points/$pointsPath"
+
+        try {
+
+            val intent = Intent(
+                Intent.ACTION_VIEW,
+                Uri.parse(routeUrl)
+            ).apply {
+                addCategory(Intent.CATEGORY_BROWSABLE)
+            }
+
+            startActivity(intent)
+
+        } catch (e: Exception) {
+
+            status.text = "Не удалось открыть 2ГИС: ${e.message}"
+
+            Toast.makeText(
+                this,
+                "Не удалось открыть ссылку маршрута",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    // ПОИСК КООРДИНАТ АДРЕСОВ
+
     private fun geocodeAddresses() {
 
         saveEditedAddresses()
@@ -959,10 +1063,13 @@ class MainActivity : Activity() {
         val addressCopy = addresses.toList()
 
         geocodeButton.isEnabled = false
+        routeButton.isEnabled = false
         photoButton.isEnabled = false
 
-        coordinatesText.text = ""
+        geocodedAddresses = emptyList()
+        warehousePoint = null
 
+        coordinatesText.text = ""
         status.text = "Подключение к 2ГИС..."
 
         executor.execute {
@@ -971,8 +1078,18 @@ class MainActivity : Activity() {
             val notFound = mutableListOf<String>()
 
             var errorMessage: String? = null
+            var foundWarehouse: GeocodeResult? = null
 
             try {
+
+                runOnUiThread {
+                    status.text = "Поиск координат склада..."
+                }
+
+                foundWarehouse = geocodeAddress(warehouseAddress)
+                    ?: throw Exception(
+                        "Не удалось определить координаты склада: $warehouseAddress"
+                    )
 
                 for ((index, address) in addressCopy.withIndex()) {
 
@@ -1004,9 +1121,17 @@ class MainActivity : Activity() {
 
             runOnUiThread {
 
+                warehousePoint =
+                    if (errorMessage == null) foundWarehouse else null
+
+                geocodedAddresses = results.toList()
+
                 val output = StringBuilder()
 
-                output.append("СКЛАД — НАЧАЛО И КОНЕЦ МАРШРУТА\n")
+                output.append(
+                    "СКЛАД — НАЧАЛО И КОНЕЦ МАРШРУТА\n"
+                )
+
                 output.append(warehouseAddress)
                 output.append("\n\n")
 
@@ -1031,7 +1156,9 @@ class MainActivity : Activity() {
 
                 if (notFound.isNotEmpty()) {
 
-                    output.append("НЕ НАЙДЕНЫ — ПРОВЕРЬТЕ ВРУЧНУЮ:\n")
+                    output.append(
+                        "НЕ НАЙДЕНЫ — ПРОВЕРЬТЕ ВРУЧНУЮ:\n"
+                    )
 
                     notFound.forEachIndexed { index, address ->
                         output.append("${index + 1}. $address\n")
@@ -1040,13 +1167,28 @@ class MainActivity : Activity() {
 
                 coordinatesText.text = output.toString()
 
-                status.text = if (errorMessage == null) {
-                    "Поиск завершён. Найдено: ${results.size}, не найдено: ${notFound.size}"
-                } else {
-                    "Поиск завершён с ошибкой: $errorMessage"
+                status.text = when {
+                    errorMessage != null ->
+                        "Поиск завершён с ошибкой: $errorMessage"
+
+                    results.size > 10 ->
+                        "Найдено ${results.size}. Для одной ссылки 2ГИС поддерживает максимум 10 адресов доставки"
+
+                    notFound.isNotEmpty() ->
+                        "Найдено: ${results.size}, не найдено: ${notFound.size}. Исправьте адреса и повторите поиск"
+
+                    else ->
+                        "Поиск завершён. Найдено: ${results.size}, не найдено: 0"
                 }
 
                 geocodeButton.isEnabled = addresses.isNotEmpty()
+
+                routeButton.isEnabled =
+                    warehousePoint != null &&
+                    results.size == addressCopy.size &&
+                    results.isNotEmpty() &&
+                    results.size <= 10
+
                 photoButton.isEnabled = true
             }
         }
